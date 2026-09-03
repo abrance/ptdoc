@@ -1,0 +1,43 @@
+# PTDoc 本地开发服务（npm run dev / vite dev server）
+#
+# 安装（项目根目录）：
+#   sudo cp deploy/systemd/ptdoc-dev.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ptdoc-dev      # 开机自启 + 立即启动
+#
+# 常用操作：
+#   systemctl status ptdoc-dev                 # 状态
+#   journalctl -u ptdoc-dev -f                 # 跟随日志
+#   sudo systemctl restart ptdoc-dev           # 重启
+#
+# 端口：默认 5173（vite dev server）。可在项目 .env 里改 PORT——
+# 本单元用 EnvironmentFile 把 .env 注入进程环境，PORT 才会真正生效
+# （vite 自身的 loadEnv 不会回写 process.env）。
+# 临时覆盖端口：sudo systemctl edit ptdoc-dev，加 Environment=PORT=8080。
+
+[Unit]
+Description=PTDoc dev server (vite, npm run dev)
+Documentation=file:/opt/mystorage/github/ptdoc/README.md
+After=network.target
+
+[Service]
+Type=simple
+
+# Node 由 nvm 安装，不在 systemd 默认 PATH 里，ExecStart 用绝对路径
+# （升级 Node 后把路径换成新的版本目录即可）
+Environment=PATH=/home/xiaoy/.nvm/versions/node/v24.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ExecStart=/home/xiaoy/.nvm/versions/node/v24.11.1/bin/npm run dev
+WorkingDirectory=/opt/mystorage/github/ptdoc
+User=xiaoy
+
+# 从项目 .env 注入 PORT / QINIU_* 等（文件不存在则忽略，服务照常启动）
+EnvironmentFile=-/opt/mystorage/github/ptdoc/.env
+
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

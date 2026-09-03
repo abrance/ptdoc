@@ -1,0 +1,12 @@
+# Docker 构建上下文排除项（构建上下文为仓库根目录，见 build/Dockerfile 与 compose 的 context）
+node_modules
+dist
+dist-site
+data
+.env
+.git
+deploy
+*.log
+*.sqlite
+*.db
+.DS_Store

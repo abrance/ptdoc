@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PTDoc</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand" id="brand">PTDoc</div>
+      <span id="doc-source" class="doc-source" hidden></span>
+      <div class="actions">
+        <button id="open-md" type="button">打开 .md</button>
+        <button id="upload-img" type="button">上传图片到七牛</button>
+        <button id="media" type="button">媒体库</button>
+        <button id="share" type="button">生成分享版<span id="share-badge" class="share-badge" hidden></span></button>
+        <button id="share-list" type="button">分享记录</button>
+        <button id="toc-toggle" type="button">目录</button>
+        <button id="snapshots" type="button">快照</button>
+        <button id="history" type="button">历史</button>
+        <span id="status" class="status"></span>
+      </div>
+      <input type="file" id="md-input" accept=".md,.markdown" hidden />
+      <input type="file" id="img-input" accept="image/*" hidden />
+      <div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div>
+    </header>
+    <main class="layout">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <input id="sidebar-search" type="search" placeholder="过滤文档…" />
+          <button id="sidebar-new" type="button" title="新建文档">＋</button>
+          <button id="sidebar-import" type="button" title="导入文件夹">📥</button>
+        </div>
+        <nav id="sidebar-tree" class="sidebar-tree"></nav>
+      </aside>
+      <section class="pane editor-pane">
+        <textarea id="editor" spellcheck="false" placeholder="在这里写 Markdown，支持 ```mermaid 代码块…"></textarea>
+      </section>
+      <section class="pane preview-pane">
+        <article id="preview" class="markdown-body"></article>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

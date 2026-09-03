@@ -1,0 +1,43 @@
+# PTDoc 一键部署编排文件
+#
+# 用法（在项目根目录）：
+#   1. 先准备配置：cd deploy/docker-compose && cp .env.example .env 并填写 QINIU_* 与端口
+#   2. 构建并启动：docker compose -f deploy/docker-compose/docker-compose.yml up -d --build
+#      或直接 make up
+#   3. 浏览器打开 http://<服务器IP>:4173
+#
+# 数据持久化：data/ 目录（SQLite 库）与 dist-site/ 目录（静态站点产物）都挂载自宿主机，
+# 删除容器不丢数据；升级代码只需 git pull 后重新 make up。
+name: ptdoc
+
+services:
+  ptdoc:
+    build:
+      context: ../..
+      dockerfile: build/Dockerfile
+      args:
+        # 站点标题 / 默认文档（构建时注入前端，从本目录 .env 读取）
+        VITE_SITE_TITLE: ${VITE_SITE_TITLE:-PTDoc · 我的 Markdown 文档站}
+        VITE_DEFAULT_DOC: ${VITE_DEFAULT_DOC:-/docs/index.md}
+    image: ptdoc:latest
+    container_name: ptdoc
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # 宿主机端口:容器端口（容器内监听 PREVIEW_PORT）
+      - "${PTDOC_PORT:-4173}:${PREVIEW_PORT:-4173}"
+    volumes:
+      # SQLite 数据库持久化（data/ptdoc.db，勿删）
+      - ../../data:/app/data
+      # 静态站点产物目录：make site 生成 dist-site/ 后可直接拷走或交给静态服务器
+      - ../../dist-site:/app/dist-site
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.PREVIEW_PORT||4173)).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
