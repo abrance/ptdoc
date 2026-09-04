@@ -1,6 +1,6 @@
 # PTDoc
 
-个人 Markdown 文档工具：整合 **Markdown 渲染 + Mermaid 图表 + 七牛云图床**，用于编写与展示 `.md` 文档。
+多用户 Markdown 文档平台：每人独立工作区，整合 **Markdown 渲染 + Mermaid 图表 + 七牛云图床**，用于编写与展示 `.md` 文档。
 
 定位是一个「**胶水代码 + 你自己的业务逻辑 + 依赖库**」的组合，方便你逐步往里塞自己的需求，而不是被某个重框架绑死。
 
@@ -10,7 +10,7 @@
 - 📊 ` ```mermaid ` 代码块自动渲染为 SVG（[`beautiful-mermaid`](https://github.com/lukilabs/beautiful-mermaid)）
 - 🖼️ 一键把本地 PNG 上传到七牛云对象存储，返回 URL 自动插入文档（图床）；顶栏「媒体库」集中管理所有上传图片（直接上传 + mermaid 图），支持搜索/筛选、复制 URL、插入光标处、删除（二次确认）
 - 📤 **「生成分享版」**：把文档里所有 ` ```mermaid ` 图表渲染成 PNG 上传七牛，自动替换为远程图片链接的 md；同时把这份 md 与渲染好的自包含 HTML 一起上传七牛（`share/` 目录），得到两份**永久公开链接**——适合直接发给别人，也可**「下载 HTML」**本地保存
-- 🏗️ **静态站点发布（build-site）**：一条命令把全部文档渲染为自包含静态站点（mermaid 内联 SVG、站内互链、左侧导航、MiniSearch 全文搜索），产物 `dist-site/` 可直接拷到任意静态服务器部署
+- 🏗️ **静态站点发布（build-site）**：按 `--user <id|username>` 把该用户工作区渲染为自包含静态站点（mermaid 内联 SVG、站内互链、左侧导航、MiniSearch 全文搜索），产物 `dist-site/` 可直接拷到任意静态服务器部署
 - 📁 **多文档工作区**：左侧文档树按路径分层展示全部文档，支持新建/重命名/删除/过滤/**批量导入文件夹**（📥 选目录递归导入，同名自动跳过），当前文档高亮；预览区内 `[](相对路径.md)` 点击即可在工作区内跳转（互链）
 - 📑 **预览目录 TOC**：顶栏「目录」开关，自动生成 h1~h3 大纲，点击平滑滚动定位；锚点 id 稳定，重渲染不跳错
 - 🔍 **跨文档全文搜索**：`Ctrl/Cmd+K`（或 `Ctrl/Cmd+P`）唤起，输入即检索所有文档的标题/文件名/正文（MiniSearch，前缀+模糊），结果带命中片段，↑↓ 选择回车打开
@@ -25,7 +25,7 @@
 ptdoc/
 ├── package.json            # 依赖库声明（beautiful-mermaid / marked / qiniu / minisearch / vite）
 ├── vite.config.ts          # 构建 + 把图床上传接口挂到 dev/preview 服务端
-├── .env.example            # 七牛云配置模板
+├── .env.example            # 服务端密钥与端口模板（七牛改由设置页填写）
 ├── index.html              # 页面骨架
 ├── public/
 │   └── docs/index.md       # 你的 md 内容（可放多篇）
@@ -64,19 +64,21 @@ ptdoc/
 
 ```bash
 npm install
-cp .env.example .env      # 填写七牛云 QINIU_* 配置（不上传图片可先跳过）
+cp .env.example .env      # 填写 PTDOC_DATA_KEY（64 位 hex）
 npm run dev               # 打开 http://localhost:5173
 ```
+
+首次启动进入 Setup 页创建 Platform Admin；之后每位用户在顶栏「设置」里填写自己的七牛云配置。缺 `PTDOC_DATA_KEY` 时进程拒绝启动。
 
 服务监听 `0.0.0.0`（局域网/容器内可直接访问），端口可在 `.env` 里改：`PORT`（开发服务器，默认 5173）、`PREVIEW_PORT`（预览服务器，默认 4173）；也可以命令行临时指定，例如 `PORT=8080 npm run dev` 或 `npm run dev -- --port 8080`（CLI 优先级最高）。
 
 构建静态站点：
 
 ```bash
-npm run build-site        # 生成 dist-site/（mermaid 内联 SVG + 导航 + 搜索）
-npm run preview-site      # 本地预览静态站点 http://localhost:4174
-npm run build             # 构建编辑器应用（产物在 dist/）
-npm run typecheck         # 仅做类型检查
+npm run build-site -- --user alice
+npm run preview-site
+npm run build
+npm run typecheck
 ```
 
 > `build-site` 需要 Node 24（直接用 `node --experimental-strip-types` 跑 TS）。站点产物纯静态，可整体拷贝到任意静态服务器；搜索使用 MiniSearch 客户端索引（`dist-site/index.json`）。
@@ -111,9 +113,9 @@ make up
 要点：
 
 - **数据**：SQLite 库在 `data/ptdoc.db`，容器内 `/app/data` 挂载自宿主机，删除容器不丢数据。
-- **配置**：部署配置在 `deploy/docker-compose/.env`（`PTDOC_PORT` 为对外端口，`QINIU_*` 为七牛密钥）。改了 `VITE_*` 站点配置需重新 `make up` 重建镜像；只改 `QINIU_*` 或端口可 `make restart`。
-- **静态站点**：`dist-site/` 依赖运行期数据库中的文档，在容器里按需生成（`make site`）；生成后可交给任意静态服务器，或直接用 `make deploy-site` 同步。
-- **七牛密钥可缺省**：不填 `QINIU_*` 也能正常启动，只是上传 / 分享功能不可用，日志里会提示。
+- **配置**：部署配置在 `deploy/docker-compose/.env`（`PTDOC_DATA_KEY` 必需，`PTDOC_PORT` 为对外端口）。改了 `VITE_*` 站点配置需重新 `make up` 重建镜像；只改端口可 `make restart`。
+- **静态站点**：`dist-site/` 依赖运行期数据库中的文档，在容器里按用户生成（`make site USER=alice`）；生成后可交给任意静态服务器，或直接用 `make deploy-site` 同步。
+- **七牛配置**：登录后在「设置」页填写；未配置时服务可启动，上传 / 分享会提示先完成对象存储配置。
 
 ## 本地 dev 服务（systemd）
 
@@ -132,21 +134,23 @@ sudo systemctl enable --now ptdoc-dev    # 开机自启 + 立即启动
 
 ## 配置七牛云图床
 
-在 [七牛开发者平台](https://portal.qiniu.com) 创建存储桶，把密钥填入 `.env`：
+在 [七牛开发者平台](https://portal.qiniu.com) 创建存储桶，登录后打开顶栏「设置」，按用户填写：
 
-| 变量 | 说明 |
+| 字段 | 说明 |
 | --- | --- |
-| `QINIU_AK` | AccessKey |
-| `QINIU_SK` | SecretKey（仅服务端使用，不会进入前端打包） |
-| `QINIU_BUCKET` | 存储桶名称 |
-| `QINIU_DOMAIN` | 访问域名（含协议，如 `https://cdn.example.com`） |
-| `QINIU_ZONE` | 区域：`Zone_z0` 华东 / `Zone_z1` 华北 / `Zone_z2` 华南 / `Zone_na0` 北美 / `Zone_as0` 东南亚 |
-| `QINIU_PRIVATE` | 是否私有桶：`true` 时下载 URL 带签名且会过期（`false` 则直接返回公开 URL） |
-| `QINIU_URL_TTL` | 私有桶签名 URL 有效期（秒），默认 3600 |
+| AccessKey | 七牛 AK |
+| SecretKey | 七牛 SK（服务端加密存储，接口只回 `secret_configured`） |
+| Bucket | 存储桶名称 |
+| Domain | 访问域名（含协议，如 `https://cdn.example.com`） |
+| Zone | `Zone_z0` 华东 / `Zone_z1` 华北 / `Zone_z2` 华南 / `Zone_na0` 北美 / `Zone_as0` 东南亚 |
+| Private | 是否私有桶：开启时下载 URL 带签名且会过期 |
+| URL TTL | 私有桶签名 URL 有效期（秒），默认 3600 |
 
-> ⚠️ **私有桶用于文档图床的注意点**：私有桶返回的下载 URL 带 `?e=...&token=...`，仅在 `QINIU_URL_TTL` 秒内有效，**过期后文档里的图片会加载失败**。如果你的 md 文档需要长期稳定显示图片，建议把存储桶设为「公开」（`QINIU_PRIVATE=false`）；若必须私有，则应在渲染文档时实时重新签发 URL（属于进阶改造，需要时可告知）。
+进程环境变量 `QINIU_*` 已废弃，运行期只读当前用户的 Storage Profile。`.env` 里只需 `PTDOC_DATA_KEY`（64 位 hex，AES-256-GCM 加密用户 SK）。
 
-上传流程：浏览器把图片二进制 POST 到本地 dev server 的 `/api/upload` → Node 端用 `qiniu` SDK 上传 → 返回 `{ url }` → 前端插入 `![](url)`。**密钥始终留在服务端**，前端只拿到最终 URL。
+私有桶返回的下载 URL 带 `?e=...&token=...`，仅在 TTL 秒内有效，过期后文档里的图片会加载失败。长期展示图片请用公开桶。
+
+上传流程：浏览器把图片二进制 POST 到 `/api/upload` → Node 端用当前用户 Profile 调 `qiniu` SDK → 返回 `{ url }` → 前端插入 `![](url)`。密钥留在服务端。
 
 ## 分享版与历史
 

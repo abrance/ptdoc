@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "build-site": "node --experimental-strip-types scripts/build-site.ts",
     "preview-site": "vite preview --outDir dist-site --port 4174",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test --test-concurrency=1 src/server/*.test.ts"
   },
   "dependencies": {
     "beautiful-mermaid": "^1.1.3",

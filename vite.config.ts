@@ -1,33 +1,46 @@
 import { defineConfig, loadEnv } from 'vite';
 import { uploadMiddleware } from './src/server/upload-api';
 import { apiMiddleware } from './src/server/api';
-import { initQiniu } from './src/server/qiniu-uploader';
+import { authApiMiddleware } from './src/server/auth-api';
 import { initDB } from './src/server/db';
+import { loadServerEnv } from './src/server/env';
 
-// 在配置加载阶段读取 .env，初始化七牛（图床仅在 Node 服务端使用）与 SQLite。
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
-  initQiniu(env);
+function bootServer(env: Record<string, string | undefined>): void {
+  loadServerEnv({ ...process.env, ...env });
   initDB();
+}
 
-  // 监听 0.0.0.0：局域网 / 容器内均可访问（页面与自定义 API 一起生效）。
-  // 端口可用环境变量覆盖，不设时回落到默认值。
+export default defineConfig(({ mode, command }) => {
+  const env = loadEnv(mode, process.cwd(), '');
+  if (command === 'serve') bootServer(env);
+
   const devPort = Number(process.env.PORT ?? 5173);
   const previewPort = Number(process.env.PREVIEW_PORT ?? 4173);
 
   return {
     root: '.',
     publicDir: 'public',
-    server: { host: '0.0.0.0', port: devPort },
-    preview: { host: '0.0.0.0', port: previewPort },
+    server: {
+      host: '0.0.0.0',
+      port: devPort,
+      allowedHosts: ['.monkeycode-ai.online'],
+    },
+    preview: {
+      host: '0.0.0.0',
+      port: previewPort,
+      allowedHosts: ['.monkeycode-ai.online'],
+    },
     plugins: [
       {
         name: 'ptdoc-server-api',
         configureServer(server) {
+          server.middlewares.use(authApiMiddleware());
           server.middlewares.use(uploadMiddleware());
           server.middlewares.use(apiMiddleware());
         },
         configurePreviewServer(server) {
+          bootServer(env);
+          server.middlewares.use(authApiMiddleware());
           server.middlewares.use(uploadMiddleware());
           server.middlewares.use(apiMiddleware());
         },

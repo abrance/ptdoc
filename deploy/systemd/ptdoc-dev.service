@@ -31,7 +31,7 @@ ExecStart=/home/xiaoy/.nvm/versions/node/v24.11.1/bin/npm run dev
 WorkingDirectory=/opt/mystorage/github/ptdoc
 User=xiaoy
 
-# 从项目 .env 注入 PORT / QINIU_* 等（文件不存在则忽略，服务照常启动）
+# 从项目 .env 注入 PORT / PTDOC_DATA_KEY 等（文件不存在则忽略，服务照常启动）
 EnvironmentFile=-/opt/mystorage/github/ptdoc/.env
 
 Restart=on-failure

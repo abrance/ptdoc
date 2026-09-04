@@ -2,7 +2,7 @@
 // 运行：npm run build-site（Node 24 直接跑 TS；复用 core 的 marked / mermaid / slug）
 import { mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { initDB, listAllDocs, getDoc } from '../src/server/db.ts';
+import { initDB, listAllDocs, getDoc, getUserByUsername, getUserById } from '../src/server/db.ts';
 import { renderMarkdown } from '../src/core/markdown.ts';
 import { renderMermaidToSvg } from '../src/core/mermaid.ts';
 import { slugify } from '../src/core/slug.ts';
@@ -234,12 +234,35 @@ const SITE_JS = `(function () {
 })();
 `;
 
+function parseUserFlag(): number {
+  const idx = process.argv.findIndex((a) => a === '--user' || a.startsWith('--user='));
+  let raw = '';
+  if (idx >= 0) {
+    raw = process.argv[idx].startsWith('--user=')
+      ? process.argv[idx].slice('--user='.length)
+      : String(process.argv[idx + 1] || '');
+  }
+  if (!raw) {
+    throw new Error('请指定 --user <id|username>，只构建该用户工作区');
+  }
+  const asId = Number(raw);
+  if (Number.isInteger(asId) && asId > 0) {
+    const u = getUserById(asId);
+    if (!u) throw new Error('用户不存在：' + raw);
+    return u.id;
+  }
+  const u = getUserByUsername(raw);
+  if (!u) throw new Error('用户不存在：' + raw);
+  return u.id;
+}
+
 // ─── 主流程 ─────────────────────────────────────────────
 function main(): void {
   initDB();
-  const all = listAllDocs()
+  const userId = parseUserFlag();
+  const all = listAllDocs(userId)
     .map((d) => {
-      const doc = getDoc(d.id);
+      const doc = getDoc(userId, d.id);
       if (!doc) return null;
       return {
         id: d.id,
