@@ -29,12 +29,27 @@ export interface StoredHandle {
   lastOpenedAt: number;
 }
 
-/** 保存/更新某文档对应的文件句柄（按 doc_key 去重）。 */
+let currentUserId = 0;
+
+export function setHandleUser(userId: number): void {
+  currentUserId = userId;
+}
+
+function scopedKey(docKey: string): string {
+  return currentUserId ? `${currentUserId}:${docKey}` : docKey;
+}
+
+/** 保存/更新某文档对应的文件句柄（按 userId:doc_key 去重）。 */
 export async function saveHandle(docKey: string, name: string, handle: any): Promise<void> {
   const db = await openIDB();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put({ docKey, name, handle, lastOpenedAt: Date.now() } as StoredHandle);
+    tx.objectStore(STORE).put({
+      docKey: scopedKey(docKey),
+      name,
+      handle,
+      lastOpenedAt: Date.now(),
+    } as StoredHandle);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -45,7 +60,7 @@ export async function getHandle(docKey: string): Promise<any | null> {
   const db = await openIDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
-    const r = tx.objectStore(STORE).get(docKey);
+    const r = tx.objectStore(STORE).get(scopedKey(docKey));
     r.onsuccess = () => resolve((r.result as StoredHandle | undefined)?.handle ?? null);
     r.onerror = () => reject(r.error);
   });
@@ -56,7 +71,7 @@ export async function removeHandle(docKey: string): Promise<void> {
   const db = await openIDB();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(docKey);
+    tx.objectStore(STORE).delete(scopedKey(docKey));
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

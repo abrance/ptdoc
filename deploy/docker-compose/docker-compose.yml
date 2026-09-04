@@ -1,7 +1,7 @@
 # PTDoc 一键部署编排文件
 #
 # 用法（在项目根目录）：
-#   1. 先准备配置：cd deploy/docker-compose && cp .env.example .env 并填写 QINIU_* 与端口
+#   1. 先准备配置：cd deploy/docker-compose && cp .env.example .env 并填写 PTDOC_DATA_KEY 与端口
 #   2. 构建并启动：docker compose -f deploy/docker-compose/docker-compose.yml up -d --build
 #      或直接 make up
 #   3. 浏览器打开 http://<服务器IP>:4173

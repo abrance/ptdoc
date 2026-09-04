@@ -4,10 +4,13 @@ import { renderMermaidBlocks, renderMermaidToPngBlob, sha256Mermaid } from '../c
 import { buildShareHtmlDoc } from '../core/share-html';
 import { diffPublish, type PublishBaseline, type PublishDiff } from '../core/publish-check';
 import MiniSearch from 'minisearch';
-import { saveHandle, getHandle } from './fileHandles';
+import { saveHandle, getHandle, setHandleUser } from './fileHandles';
 import { renderToc, attachTocScrollHighlight } from './toc';
 import { initSidebar } from './sidebar';
 import { initMediaPanel } from './media';
+import { startGate, logout, type SessionUser } from './gate';
+import { initSettingsPanel } from './settings';
+import { initAdminPanel } from './admin';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -1214,34 +1217,8 @@ async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
   }
 }
 
-// ─── 启动 ───────────────────────────────────────────────
+// ─── 启动（登录后才加载工作区）──────────────────────────
 $('toc-toggle').addEventListener('click', () => toggleToc());
-void refreshDocsIndex();
-
-// 媒体库面板：插入图片到光标处
-const mediaPanel = initMediaPanel({
-  onInsert: (url, filename) => {
-    insertAtCursor(`\n![${filename}](${url})\n`);
-    render();
-  },
-  onStatus: setStatus,
-});
-$('media').addEventListener('click', () => mediaPanel.toggle());
-
-// 侧边栏文档树：点击打开 / 重命名后同步当前文档上下文
-sidebarRef = initSidebar({
-  onOpen: (id) => void openDocById(id),
-  getCurrentKey: () => currentDocKey,
-  onStatus: setStatus,
-  onRenamed: (oldKey, newKey) => {
-    if (currentDocKey === oldKey) {
-      currentDocKey = newKey;
-      currentFilename = newKey.slice(newKey.lastIndexOf('/') + 1);
-      void refreshPublishBaseline();
-    }
-    setStatus('已重命名为：' + newKey);
-  },
-});
 
 editor.addEventListener('input', () => {
   scheduleRender();
@@ -1249,7 +1226,6 @@ editor.addEventListener('input', () => {
   schedulePublishCheck();
 });
 
-// 全局快捷键唤起"快速打开 / 搜索"（补全式文件查找）
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) {
     e.preventDefault();
@@ -1257,4 +1233,54 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-loadDefaultDoc();
+void startGate((user: SessionUser) => {
+  setHandleUser(user.id);
+  searchIndex = null;
+  searchDocs = [];
+  currentDocKey = 'default';
+  currentFilename = 'index.md';
+  currentDocId = null;
+  editor.value = '';
+  preview.innerHTML = '';
+
+  const who = $('whoami');
+  who.hidden = false;
+  who.textContent = user.username + (user.role === 'admin' ? ' · 管理员' : '');
+  $('logout').hidden = false;
+  $('logout').onclick = () => void logout();
+
+  const settings = initSettingsPanel({ onStatus: setStatus });
+  $('settings').addEventListener('click', () => settings.toggle());
+
+  if (user.role === 'admin') {
+    $('admin').hidden = false;
+    const admin = initAdminPanel({ onStatus: setStatus });
+    $('admin').addEventListener('click', () => admin.toggle());
+  }
+
+  const mediaPanel = initMediaPanel({
+    onInsert: (url, filename) => {
+      insertAtCursor(`\n![${filename}](${url})\n`);
+      render();
+    },
+    onStatus: setStatus,
+  });
+  $('media').addEventListener('click', () => mediaPanel.toggle());
+
+  sidebarRef = initSidebar({
+    onOpen: (id) => void openDocById(id),
+    getCurrentKey: () => currentDocKey,
+    onStatus: setStatus,
+    onRenamed: (oldKey, newKey) => {
+      if (currentDocKey === oldKey) {
+        currentDocKey = newKey;
+        currentFilename = newKey.slice(newKey.lastIndexOf('/') + 1);
+        void refreshPublishBaseline();
+      }
+      setStatus('已重命名为：' + newKey);
+    },
+  });
+
+  void refreshDocsIndex();
+  loadDefaultDoc();
+});

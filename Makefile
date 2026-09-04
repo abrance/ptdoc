@@ -8,6 +8,7 @@
 
 COMPOSE  := docker compose -f deploy/docker-compose/docker-compose.yml
 SITE     ?=
+USER     ?=
 
 .PHONY: help build up down restart logs ps exec site deploy deploy-site
 
@@ -36,8 +37,9 @@ ps: ## 查看服务状态
 exec: ## 进入容器终端
 	$(COMPOSE) exec ptdoc sh
 
-site: ## 在容器内重新生成静态站点到 ./dist-site
-	$(COMPOSE) exec ptdoc npm run build-site
+site: ## 在容器内按用户生成静态站点：make site USER=alice
+	@test -n "$(USER)" || (echo "用法：make site USER=<id|username>"; exit 1)
+	$(COMPOSE) exec ptdoc npm run build-site -- --user $(USER)
 
 deploy: up ## 服务器上一键部署（构建 + 启动）
 

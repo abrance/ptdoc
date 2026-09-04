@@ -21,8 +21,8 @@ ARG VITE_SITE_TITLE
 ARG VITE_DEFAULT_DOC
 ENV VITE_SITE_TITLE=${VITE_SITE_TITLE} VITE_DEFAULT_DOC=${VITE_DEFAULT_DOC}
 
-# vite.config.ts 加载时会 initDB()（生成空的 data/ptdoc.db）与 initQiniu()（缺密钥静默跳过），
-# 因此没有 .env 也能完成构建；data/ 已被 .dockerignore 排除，不会带进镜像。
+# vite build 不读取 PTDOC_DATA_KEY；运行期 preview 启动时才校验并 initDB()。
+# data/ 已被 .dockerignore 排除，不会带进镜像。
 RUN npm run build
 
 # ─── 运行阶段 ─────────────────────────────────────────────────
