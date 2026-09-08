@@ -1,0 +1,35 @@
+# PTDoc 生产部署（运行 GHCR 预构建镜像，不构建源码）
+#
+# 用法（把本文件放到生产服务器任意目录，比如 /opt/ptdoc，与 data/、.env 同层）：
+#   1. 准备配置：cp .env.prod.example .env 并填写 PTDOC_DATA_KEY（64 位 hex，openssl rand -hex 32）
+#   2. 启动：   docker compose -f docker-compose.prod.yml up -d
+#   3. 升级：   打新 tag 后 docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d
+#   4. 查看：   docker compose -f docker-compose.prod.yml ps / logs -f
+#
+# 数据持久化：data/（SQLite）与 dist-site/（静态站点产物）挂载自宿主机，删容器不丢数据。
+
+name: ptdoc-prod
+
+services:
+  ptdoc:
+    image: ghcr.io/abrance/ptdoc:${PTDOC_TAG:-v1.0.2}
+    container_name: ptdoc
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # 宿主机端口:容器端口。改宿主机端口就改冒号左边（如 8080:4173）。
+      - "4173:4173"
+    volumes:
+      - ./data:/app/data
+      - ./dist-site:/app/dist-site
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.PREVIEW_PORT||4173)).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
