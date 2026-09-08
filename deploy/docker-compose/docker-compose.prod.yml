@@ -12,7 +12,7 @@ name: ptdoc-prod
 
 services:
   ptdoc:
-    image: ghcr.io/abrance/ptdoc:${PTDOC_TAG:-v1.0.2}
+    image: ghcr.io/abrance/ptdoc:${PTDOC_TAG:-v1.0.3}
     container_name: ptdoc
     restart: unless-stopped
     env_file:
