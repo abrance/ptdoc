@@ -10,6 +10,10 @@ function bootServer(env: Record<string, string | undefined>): void {
   initDB();
 }
 
+// 允许以这些 Host 访问（含子域名，前导点匹配任意子域）。正式环境经反向代理访问，
+// Host 是真实域名；未列入时 vite 会返回 "Blocked request. This host is not allowed"。
+const ALLOWED_HOSTS = ['.xiaoyxq.top', '.monkeycode-ai.online'];
+
 export default defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '');
   if (command === 'serve') bootServer(env);
@@ -23,12 +27,12 @@ export default defineConfig(({ mode, command }) => {
     server: {
       host: '0.0.0.0',
       port: devPort,
-      allowedHosts: ['.monkeycode-ai.online'],
+      allowedHosts: ALLOWED_HOSTS,
     },
     preview: {
       host: '0.0.0.0',
       port: previewPort,
-      allowedHosts: ['.monkeycode-ai.online'],
+      allowedHosts: ALLOWED_HOSTS,
     },
     plugins: [
       {
