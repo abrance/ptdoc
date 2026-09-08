@@ -13,6 +13,12 @@ on:
   push:
     tags: ['v*']
 
+# 权限沿 workflow_call 调用链只减不增：必须在此显式声明 packages: write，
+# 被调用的 yoc docker-publish-ghcr 才被允许以该权限发布 GHCR。
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   docker-publish:
     uses: abrance/yoc/.github/workflows/docker-publish-ghcr.yml@v1.0.0
