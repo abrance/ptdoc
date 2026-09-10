@@ -50,13 +50,13 @@ export function authApiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, { initialized: countUsers() > 0 });
       }
       if (url === '/api/setup' && req.method === 'POST') {
-        return handleSetup(req, res);
+        return await handleSetup(req, res);
       }
       if (url === '/api/auth/register' && req.method === 'POST') {
-        return handleRegister(req, res);
+        return await handleRegister(req, res);
       }
       if (url === '/api/auth/login' && req.method === 'POST') {
-        return handleLogin(req, res);
+        return await handleLogin(req, res);
       }
       if (url === '/api/auth/logout' && req.method === 'POST') {
         return handleLogout(req, res);
@@ -66,7 +66,7 @@ export function authApiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, toPublicUser(user));
       }
       if (url === '/api/auth/password' && req.method === 'POST') {
-        return handleChangePassword(req, res);
+        return await handleChangePassword(req, res);
       }
       if (url === '/api/admin/users' && req.method === 'GET') {
         const user = requireUser(req, res);

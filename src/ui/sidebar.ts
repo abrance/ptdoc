@@ -64,8 +64,8 @@ function renderDoc(doc: SidebarDoc, currentKey: string): HTMLLIElement {
   li.innerHTML = `
     <span class="tree-label" title="${esc(doc.doc_key)}">${esc(doc.title)}</span>
     <span class="tree-ops">
-      <button class="tree-op" data-op="rename" title="重命名">✎</button>
-      <button class="tree-op" data-op="delete" title="删除">🗑</button>
+      <button class="tree-op" data-op="rename" title="重命名" aria-label="重命名"><svg class="icon"><use href="#i-pencil"></use></svg></button>
+      <button class="tree-op" data-op="delete" title="删除" aria-label="删除"><svg class="icon"><use href="#i-trash"></use></svg></button>
     </span>`;
   return li;
 }
@@ -110,7 +110,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       else ul.appendChild(renderDoc(n.doc, currentKey));
     }
     if (docs.length === 0) {
-      treeEl.innerHTML = '<div class="tree-empty">暂无文档，点 ＋ 新建</div>';
+      treeEl.innerHTML = '<div class="tree-empty">暂无文档，点「新建」开始</div>';
       return;
     }
     treeEl.appendChild(ul);

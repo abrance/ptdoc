@@ -61,6 +61,7 @@ function render(): void {
     renderToc(preview, body);
     tocScrollCleanup = attachTocScrollHighlight(preview, body);
   }
+  syncChrome();
 }
 function scheduleRender(): void {
   clearTimeout(renderTimer);
@@ -79,6 +80,102 @@ function setDocSource(kind: DocSourceKind, label: string, reason: string): void 
   el.className = 'doc-source kind-' + kind;
   el.textContent = label;
   el.title = reason;
+  syncChrome();
+}
+
+function syncChrome(): void {
+  const titleEl = $('doc-title');
+  const pathEl = $('doc-path');
+  const heading = editor.value.match(/^#\s+(.+)$/m);
+  const title = (heading ? heading[1].trim() : currentFilename || currentDocKey || '未命名').slice(0, 80);
+  titleEl.textContent = title;
+  titleEl.title = currentDocKey;
+  pathEl.textContent = currentDocKey;
+}
+
+type WorkspaceView = 'edit' | 'split' | 'preview';
+let workspaceView: WorkspaceView = 'split';
+
+function setWorkspaceView(view: WorkspaceView): void {
+  workspaceView = view;
+  document.body.classList.toggle('view-edit', view === 'edit');
+  document.body.classList.toggle('view-preview', view === 'preview');
+  document.body.classList.toggle('view-split', view === 'split');
+  const main = document.querySelector('.workspace-main') as HTMLElement | null;
+  if (main && (view !== 'split' || isMobileLayout())) main.style.gridTemplateColumns = '';
+  for (const id of ['view-edit', 'view-split', 'view-preview'] as const) {
+    const btn = $(id);
+    const on = btn.dataset.view === view;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+}
+
+function isMobileLayout(): boolean {
+  return window.matchMedia('(max-width: 860px)').matches;
+}
+
+function setSidebarOpen(open: boolean): void {
+  const btn = $('sidebar-toggle');
+  const backdrop = $('sidebar-backdrop');
+  if (isMobileLayout()) {
+    document.body.classList.toggle('sidebar-open', open);
+    document.body.classList.toggle('sidebar-collapsed', !open);
+    backdrop.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.title = open ? '关闭文档树' : '打开文档树';
+    return;
+  }
+  document.body.classList.toggle('sidebar-collapsed', !open);
+  document.body.classList.remove('sidebar-open');
+  backdrop.hidden = true;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  btn.title = open ? '折叠侧边栏' : '展开侧边栏';
+}
+
+function initLayoutChrome(): void {
+  setWorkspaceView(isMobileLayout() ? 'edit' : 'split');
+  setSidebarOpen(!isMobileLayout());
+  $('view-edit').addEventListener('click', () => setWorkspaceView('edit'));
+  $('view-split').addEventListener('click', () => setWorkspaceView('split'));
+  $('view-preview').addEventListener('click', () => setWorkspaceView('preview'));
+  $('sidebar-toggle').addEventListener('click', () => {
+    const open = isMobileLayout()
+      ? !document.body.classList.contains('sidebar-open')
+      : document.body.classList.contains('sidebar-collapsed');
+    setSidebarOpen(open);
+  });
+  $('sidebar-backdrop').addEventListener('click', () => setSidebarOpen(false));
+  const handle = $('split-handle');
+  const main = document.querySelector('.workspace-main') as HTMLElement;
+  handle.addEventListener('pointerdown', (e) => {
+    if (workspaceView !== 'split' || isMobileLayout()) return;
+    e.preventDefault();
+    const start = main.getBoundingClientRect();
+    document.body.classList.add('resizing');
+    const move = (ev: PointerEvent) => {
+      const ratio = (ev.clientX - start.left) / start.width;
+      const left = Math.min(0.72, Math.max(0.28, ratio));
+      main.style.gridTemplateColumns = left + 'fr 6px ' + (1 - left) + 'fr';
+    };
+    const up = () => {
+      document.body.classList.remove('resizing');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  window.addEventListener('resize', () => {
+    if (isMobileLayout()) {
+      const pane = document.querySelector('.workspace-main') as HTMLElement | null;
+      if (pane) pane.style.gridTemplateColumns = '';
+    }
+    if (!isMobileLayout()) {
+      document.body.classList.remove('sidebar-open');
+      $('sidebar-backdrop').hidden = true;
+    }
+  });
 }
 
 // ─── 预览区目录 TOC ─────────────────────────────────────
@@ -86,14 +183,14 @@ let tocOpen = false;
 let tocPanel: HTMLElement | null = null;
 
 function ensureTocPanel(): HTMLElement {
-  if (tocPanel && document.body.contains(tocPanel)) return tocPanel;
+  if (tocPanel && tocPanel.isConnected) return tocPanel;
   tocPanel = document.createElement('div');
   tocPanel.id = 'toc-panel';
   tocPanel.className = 'toc-panel';
   tocPanel.innerHTML =
-    '<div class="toc-head"><span>目录</span><button id="toc-close" type="button">✕</button></div>' +
+    '<div class="toc-head"><span>目录</span><button id="toc-close" type="button">关闭</button></div>' +
     '<nav class="toc-body"></nav>';
-  document.body.appendChild(tocPanel);
+  document.querySelector('.preview-pane')?.appendChild(tocPanel);
   $('toc-close').addEventListener('click', () => toggleToc(false));
   return tocPanel;
 }
@@ -251,6 +348,7 @@ function loadContent(docKey: string, filename: string, content: string): void {
   currentDocKey = docKey;
   currentFilename = filename;
   render();
+  syncChrome();
   saveCurrentDoc();
   sidebarRef?.refresh();
   void refreshPublishBaseline();
@@ -1219,6 +1317,7 @@ async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
 
 // ─── 启动（登录后才加载工作区）──────────────────────────
 $('toc-toggle').addEventListener('click', () => toggleToc());
+initLayoutChrome();
 
 editor.addEventListener('input', () => {
   scheduleRender();
@@ -1230,6 +1329,13 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) {
     e.preventDefault();
     toggleHistory();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+    e.preventDefault();
+    const open = isMobileLayout()
+      ? !document.body.classList.contains('sidebar-open')
+      : document.body.classList.contains('sidebar-collapsed');
+    setSidebarOpen(open);
   }
 });
 
@@ -1268,7 +1374,10 @@ void startGate((user: SessionUser) => {
   $('media').addEventListener('click', () => mediaPanel.toggle());
 
   sidebarRef = initSidebar({
-    onOpen: (id) => void openDocById(id),
+    onOpen: (id) => {
+      void openDocById(id);
+      if (isMobileLayout()) setSidebarOpen(false);
+    },
     getCurrentKey: () => currentDocKey,
     onStatus: setStatus,
     onRenamed: (oldKey, newKey) => {
@@ -1276,6 +1385,7 @@ void startGate((user: SessionUser) => {
         currentDocKey = newKey;
         currentFilename = newKey.slice(newKey.lastIndexOf('/') + 1);
         void refreshPublishBaseline();
+        syncChrome();
       }
       setStatus('已重命名为：' + newKey);
     },
