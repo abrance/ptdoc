@@ -590,6 +590,7 @@ async function generateShare(): Promise<void> {
     shareId = r.id ?? null;
     // 刚发布成功，刷新一致性基准（角标消失或反映新状态）
     void refreshPublishBaseline();
+    void sidebarRef?.refresh();
   } catch {
     /* 忽略离线 */
   }
@@ -673,6 +674,7 @@ async function uploadShareHtml(): Promise<void> {
           body: JSON.stringify({ html_url: up.url }),
         });
         setStatus('已上传，永久链接已复制并入库：' + up.url);
+        void sidebarRef?.refresh();
       } catch {
         setStatus('已上传，永久链接已复制：' + up.url + '（记录入库失败）');
       }
