@@ -515,6 +515,38 @@ body.resizing {
   min-width: 0;
 }
 
+.sidebar-tabs {
+  display: flex;
+  gap: 0;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-tab {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.sidebar-tab:hover {
+  color: var(--fg);
+}
+
+.sidebar-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.sidebar[data-mode="archive"] #sidebar-import {
+  display: none;
+}
+
 .sidebar-head {
   display: flex;
   gap: 6px;
@@ -570,6 +602,22 @@ body.resizing {
   background: var(--surface);
 }
 
+.tree-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tree-folder-row .tree-folder-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-folder-row:hover .tree-ops,
+.tree-folder-row:focus-within .tree-ops {
+  display: flex;
+}
+
 .tree-caret {
   display: inline-block;
   width: 12px;
@@ -619,6 +667,17 @@ body.resizing {
   white-space: nowrap;
 }
 
+.tree-stale {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #b45309;
+  background: #fff7ed;
+  border-radius: 999px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
 .tree-ops {
   display: none;
   gap: 2px;
@@ -647,6 +706,10 @@ body.resizing {
 }
 
 .tree-op[data-op="delete"]:hover {
+  color: var(--danger);
+}
+
+.tree-op[data-op="folder-delete"]:hover {
   color: var(--danger);
 }
 

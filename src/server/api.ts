@@ -29,6 +29,11 @@ import {
   getMedia,
   deleteMediaRecord,
   getStorageProfile,
+  listArchive,
+  updateArchivePath,
+  createArchiveFolder,
+  renameArchiveFolder,
+  deleteArchiveFolder,
 } from './db';
 import { parseStorageInput, saveVerifiedProfile, toPublicProfile, verifyConnectivity } from './storage';
 
@@ -44,6 +49,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       !url.startsWith('/api/mermaid-cache') &&
       !url.startsWith('/api/media') &&
       !url.startsWith('/api/storage') &&
+      !url.startsWith('/api/archive') &&
       !url.startsWith('/s/')
     )
       return next();
@@ -81,6 +87,30 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         const cfg = parseStorageInput(b, getStorageProfile(uid));
         const saved = await saveVerifiedProfile(uid, cfg);
         return sendJson(res, 200, saved);
+      }
+
+      const archiveGet = url.match(/^\/api\/archive(?:\?.*)?$/);
+      if (archiveGet && req.method === 'GET') {
+        const q = new URL(url, 'http://localhost').searchParams.get('q') || undefined;
+        return sendJson(res, 200, listArchive(uid, q));
+      }
+      if (url === '/api/archive/folders' && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, createArchiveFolder(uid, b.path));
+      }
+      if (url === '/api/archive/folders/rename' && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, renameArchiveFolder(uid, b.from, b.to));
+      }
+      const folderDel = url.match(/^\/api\/archive\/folders(?:\?.*)?$/);
+      if (folderDel && req.method === 'DELETE') {
+        const path = new URL(url, 'http://localhost').searchParams.get('path');
+        return sendJson(res, 200, deleteArchiveFolder(uid, path));
+      }
+      const archivePathMatch = url.match(/^\/api\/docs\/(\d+)\/archive-path$/);
+      if (archivePathMatch && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, updateArchivePath(uid, Number(archivePathMatch[1]), b.archive_path));
       }
 
       const snapMatch = url.match(/^\/api\/docs\/(\d+)\/snapshots$/);
