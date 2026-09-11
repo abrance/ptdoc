@@ -689,7 +689,8 @@ body.toc-on .preview-pane {
 .markdown-body {
   line-height: 1.7;
   font-size: 15px;
-  max-width: 78ch;
+  width: 100%;
+  max-width: none;
 }
 
 .markdown-body h1,
