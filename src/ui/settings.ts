@@ -50,11 +50,20 @@ export function initSettingsPanel(opts: {
         <label>原密码<input name="old_password" type="password" autocomplete="current-password" /></label>
         <label>新密码<input name="new_password" type="password" autocomplete="new-password" /></label>
         <button type="button" id="password-save">更新密码</button>
+        <h3>API Token</h3>
+        <p class="settings-hint" id="api-token-hint"></p>
+        <label>新 Token<input name="api_token" autocomplete="off" placeholder="16–64 位字母或数字" /></label>
+        <div class="settings-ops">
+          <button type="button" id="api-token-save">保存 Token</button>
+          <button type="button" id="api-token-clear">清空 Token</button>
+        </div>
       </form>`;
     document.body.appendChild(drawer);
     document.getElementById('settings-close')!.addEventListener('click', () => drawer!.classList.remove('open'));
     document.getElementById('storage-test')!.addEventListener('click', () => void test());
     document.getElementById('password-save')!.addEventListener('click', () => void changePassword());
+    document.getElementById('api-token-save')!.addEventListener('click', () => void saveApiToken());
+    document.getElementById('api-token-clear')!.addEventListener('click', () => void clearApiToken());
     (document.getElementById('settings-form') as HTMLFormElement).addEventListener('submit', (e) => {
       e.preventDefault();
       void save();
@@ -93,6 +102,7 @@ export function initSettingsPanel(opts: {
     sk.value = '';
     sk.placeholder = p.secret_configured ? '已配置（留空则保持原值）' : '未配置';
     hint.textContent = p.verified ? '当前配置已通过连通性校验' : '尚未保存可用的对象存储配置';
+    await fillApiToken();
   };
 
   const test = async (): Promise<void> => {
@@ -139,6 +149,50 @@ export function initSettingsPanel(opts: {
       const j = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(j.error || '改密失败');
       opts.onStatus('密码已更新');
+    } catch (e) {
+      opts.onStatus((e as Error).message, true);
+    }
+  };
+
+  const fillApiToken = async (): Promise<void> => {
+    const hint = document.getElementById('api-token-hint') as HTMLElement;
+    const input = (document.getElementById('settings-form') as HTMLFormElement).elements.namedItem(
+      'api_token',
+    ) as HTMLInputElement;
+    const clearBtn = document.getElementById('api-token-clear') as HTMLButtonElement;
+    const res = await fetch('/api/auth/me');
+    const me = (await res.json()) as { has_api_token?: boolean };
+    const configured = !!me.has_api_token;
+    hint.textContent = configured ? '已配置（服务端不保存明文，填写新值即可轮换）' : '未配置';
+    input.value = '';
+    clearBtn.disabled = !configured;
+  };
+
+  const saveApiToken = async (): Promise<void> => {
+    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const token = (form.elements.namedItem('api_token') as HTMLInputElement).value;
+    try {
+      const res = await fetch('/api/auth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const j = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(j.error || '保存 Token 失败');
+      opts.onStatus('API Token 已保存');
+      await fillApiToken();
+    } catch (e) {
+      opts.onStatus((e as Error).message, true);
+    }
+  };
+
+  const clearApiToken = async (): Promise<void> => {
+    try {
+      const res = await fetch('/api/auth/token', { method: 'DELETE' });
+      const j = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(j.error || '清空 Token 失败');
+      opts.onStatus('API Token 已清空');
+      await fillApiToken();
     } catch (e) {
       opts.onStatus((e as Error).message, true);
     }

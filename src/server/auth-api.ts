@@ -9,6 +9,7 @@ import {
   getUserByUsername,
   initDB,
   listUsers,
+  setUserApiTokenHash,
   updateUserPassword,
   updateUserRole,
   updateUserStatus,
@@ -25,6 +26,7 @@ import {
   requireAdmin,
   requireUser,
   toPublicUser,
+  validateApiToken,
   validatePassword,
   validateUsername,
   verifyPassword,
@@ -67,6 +69,12 @@ export function authApiMiddleware(): Connect.NextHandleFunction {
       }
       if (url === '/api/auth/password' && req.method === 'POST') {
         return await handleChangePassword(req, res);
+      }
+      if (url === '/api/auth/token' && req.method === 'POST') {
+        return await handleSetApiToken(req, res);
+      }
+      if (url === '/api/auth/token' && req.method === 'DELETE') {
+        return handleClearApiToken(req, res);
       }
       if (url === '/api/admin/users' && req.method === 'GET') {
         const user = requireUser(req, res);
@@ -176,4 +184,18 @@ async function handleChangePassword(req: IncomingMessage, res: ServerResponse): 
   deleteSessionsForUser(user.id);
   issueSession(res, user.id);
   sendJson(res, 200, { ok: true });
+}
+
+async function handleSetApiToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const user = requireUser(req, res);
+  const b = await readJson(req);
+  const token = validateApiToken(String(b.token || ''));
+  setUserApiTokenHash(user.id, hashToken(token));
+  sendJson(res, 200, { ok: true, has_api_token: true });
+}
+
+function handleClearApiToken(req: IncomingMessage, res: ServerResponse): void {
+  const user = requireUser(req, res);
+  setUserApiTokenHash(user.id, null);
+  sendJson(res, 200, { ok: true, has_api_token: false });
 }

@@ -148,7 +148,8 @@ function migrateToMultiUser(): void {
       role          TEXT NOT NULL CHECK(role IN ('admin','member')),
       status        TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
       created_at    INTEGER NOT NULL,
-      updated_at    INTEGER NOT NULL
+      updated_at    INTEGER NOT NULL,
+      api_token_hash TEXT
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
@@ -191,6 +192,14 @@ function migrateToMultiUser(): void {
     d.exec('ROLLBACK');
     throw e;
   }
+}
+
+function migrateApiTokenHash(): void {
+  const d = getDb();
+  if (!tableHasColumn('users', 'api_token_hash')) {
+    d.exec('ALTER TABLE users ADD COLUMN api_token_hash TEXT');
+  }
+  d.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_token ON users(api_token_hash)');
 }
 
 /** 初始化 SQLite。dbFile 缺省为项目根 data/ptdoc.db。重复调用安全。 */
@@ -270,6 +279,7 @@ export function initDB(dbFile?: string): void {
     /* 列已存在则忽略 */
   }
   migrateToMultiUser();
+  migrateApiTokenHash();
 }
 
 export function closeDB(): void {
@@ -301,6 +311,7 @@ export interface UserRow {
   status: UserStatus;
   created_at: number;
   updated_at: number;
+  api_token_hash: string | null;
 }
 
 export interface UserPublic {
@@ -359,6 +370,25 @@ export function updateUserPassword(id: number, passwordHash: string): void {
   const r = getDb()
     .prepare('UPDATE users SET password_hash=?, updated_at=? WHERE id=?')
     .run(passwordHash, Date.now(), id);
+  if (Number(r.changes) === 0) throw new Error('用户不存在');
+}
+
+export function getUserByApiTokenHash(hash: string): UserRow | undefined {
+  return getDb().prepare('SELECT * FROM users WHERE api_token_hash=?').get(hash) as
+    | unknown as UserRow
+    | undefined;
+}
+
+export function setUserApiTokenHash(userId: number, hash: string | null): void {
+  if (hash) {
+    const other = getDb()
+      .prepare('SELECT id FROM users WHERE api_token_hash=? AND id!=?')
+      .get(hash, userId) as { id: number } | undefined;
+    if (other) throw new HttpError(409, 'API Token 已被使用');
+  }
+  const r = getDb()
+    .prepare('UPDATE users SET api_token_hash=?, updated_at=? WHERE id=?')
+    .run(hash, Date.now(), userId);
   if (Number(r.changes) === 0) throw new Error('用户不存在');
 }
 
