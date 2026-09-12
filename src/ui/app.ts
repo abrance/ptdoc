@@ -11,6 +11,7 @@ import { initMediaPanel } from './media';
 import { startGate, logout, type SessionUser } from './gate';
 import { initSettingsPanel } from './settings';
 import { initAdminPanel } from './admin';
+import { initAgentChat } from './agent-chat';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -1357,6 +1358,21 @@ void startGate((user: SessionUser) => {
 
   const settings = initSettingsPanel({ onStatus: setStatus });
   $('settings').addEventListener('click', () => settings.toggle());
+
+  const agent = initAgentChat({
+    onStatus: setStatus,
+    getCurrentDocId: () => currentDocId,
+    insertAtCursor: (text) => {
+      insertAtCursor(text);
+      scheduleRender();
+      scheduleSave();
+    },
+    onDraftApplied: (mode, docId) => {
+      void sidebarRef?.refresh();
+      if (mode === 'replace-current' && docId) void openDocById(docId);
+    },
+  });
+  $('agent').addEventListener('click', () => agent.toggle());
 
   if (user.role === 'admin') {
     $('admin').hidden = false;

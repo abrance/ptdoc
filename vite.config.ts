@@ -4,10 +4,13 @@ import { apiMiddleware } from './src/server/api';
 import { authApiMiddleware } from './src/server/auth-api';
 import { initDB } from './src/server/db';
 import { loadServerEnv } from './src/server/env';
+import { agentApiMiddleware } from './src/server/agent-api';
+import { initAgentRuntime } from './src/server/agent-runtime';
 
 function bootServer(env: Record<string, string | undefined>): void {
   loadServerEnv({ ...process.env, ...env });
   initDB();
+  void initAgentRuntime();
 }
 
 export default defineConfig(({ mode, command }) => {
@@ -36,12 +39,14 @@ export default defineConfig(({ mode, command }) => {
         name: 'ptdoc-server-api',
         configureServer(server) {
           server.middlewares.use(authApiMiddleware());
+          server.middlewares.use(agentApiMiddleware());
           server.middlewares.use(uploadMiddleware());
           server.middlewares.use(apiMiddleware());
         },
         configurePreviewServer(server) {
           bootServer(env);
           server.middlewares.use(authApiMiddleware());
+          server.middlewares.use(agentApiMiddleware());
           server.middlewares.use(uploadMiddleware());
           server.middlewares.use(apiMiddleware());
         },

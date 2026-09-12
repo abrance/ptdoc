@@ -193,6 +193,73 @@ function migrateToMultiUser(): void {
   }
 }
 
+function migrateAgentTables(): void {
+  getDb().exec(`
+    CREATE TABLE IF NOT EXISTS llm_profiles (
+      user_id        INTEGER PRIMARY KEY,
+      base_url       TEXT NOT NULL,
+      api_key_enc    TEXT NOT NULL,
+      model          TEXT NOT NULL,
+      updated_at     INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS qdrant_profiles (
+      user_id       INTEGER PRIMARY KEY,
+      url           TEXT NOT NULL,
+      api_key_enc   TEXT,
+      collection    TEXT NOT NULL,
+      vector_name   TEXT,
+      top_k         INTEGER NOT NULL DEFAULT 5,
+      updated_at    INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_extensions (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind          TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      enabled       INTEGER NOT NULL DEFAULT 1,
+      config_json   TEXT NOT NULL,
+      secrets_enc   TEXT,
+      file_dir      TEXT,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL,
+      UNIQUE(kind, name)
+    );
+    CREATE TABLE IF NOT EXISTS agent_conversations (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id       INTEGER NOT NULL,
+      scene         TEXT NOT NULL,
+      title         TEXT NOT NULL DEFAULT '',
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_turns (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL,
+      user_id         INTEGER NOT NULL,
+      role            TEXT NOT NULL,
+      content         TEXT NOT NULL,
+      draft_md        TEXT,
+      trace_id        TEXT,
+      created_at      INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_traces (
+      trace_id        TEXT PRIMARY KEY,
+      user_id         INTEGER NOT NULL,
+      conversation_id INTEGER NOT NULL,
+      turn_id         INTEGER NOT NULL,
+      model           TEXT,
+      input_tokens    INTEGER,
+      output_tokens   INTEGER,
+      latency_ms      INTEGER,
+      hits_json       TEXT,
+      spans_json      TEXT,
+      created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_conv_user ON agent_conversations(user_id, scene, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_turns_conv ON agent_turns(conversation_id, id);
+    CREATE INDEX IF NOT EXISTS idx_agent_traces_user ON agent_traces(user_id, conversation_id);
+  `);
+}
+
 /** 初始化 SQLite。dbFile 缺省为项目根 data/ptdoc.db。重复调用安全。 */
 export function initDB(dbFile?: string): void {
   if (db) return;
@@ -270,6 +337,7 @@ export function initDB(dbFile?: string): void {
     /* 列已存在则忽略 */
   }
   migrateToMultiUser();
+  migrateAgentTables();
 }
 
 export function closeDB(): void {
@@ -527,6 +595,12 @@ export function upsertDoc(
 
 export function getDoc(userId: number, id: number): DocRow | undefined {
   return getDb().prepare('SELECT * FROM docs WHERE id=? AND user_id=?').get(id, userId) as
+    | unknown as DocRow
+    | undefined;
+}
+
+export function getDocByKey(userId: number, docKey: string): DocRow | undefined {
+  return getDb().prepare('SELECT * FROM docs WHERE user_id=? AND doc_key=?').get(userId, docKey) as
     | unknown as DocRow
     | undefined;
 }
@@ -851,5 +925,336 @@ export function putMermaidCache(userId: number, hash: string, key: string, url: 
     .prepare(
       'INSERT OR REPLACE INTO mermaid_cache (user_id, mermaid_hash, qiniu_key, url, created_at) VALUES (?,?,?,?,?)',
     )
-    .run(userId, hash, key, url, now);
+      .run(userId, hash, key, url, now);
+}
+
+// ─── Agent profiles / conversations / extensions ────────
+
+export interface LlmProfileRow {
+  user_id: number;
+  base_url: string;
+  api_key_enc: string;
+  model: string;
+  updated_at: number;
+}
+
+export interface QdrantProfileRow {
+  user_id: number;
+  url: string;
+  api_key_enc: string | null;
+  collection: string;
+  vector_name: string | null;
+  top_k: number;
+  updated_at: number;
+}
+
+export interface AgentExtensionRow {
+  id: number;
+  kind: string;
+  name: string;
+  enabled: number;
+  config_json: string;
+  secrets_enc: string | null;
+  file_dir: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentConversationRow {
+  id: number;
+  user_id: number;
+  scene: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentTurnRow {
+  id: number;
+  conversation_id: number;
+  user_id: number;
+  role: string;
+  content: string;
+  draft_md: string | null;
+  trace_id: string | null;
+  created_at: number;
+}
+
+export interface AgentTraceRow {
+  trace_id: string;
+  user_id: number;
+  conversation_id: number;
+  turn_id: number;
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  latency_ms: number | null;
+  hits_json: string | null;
+  spans_json: string | null;
+  created_at: number;
+}
+
+export function getLlmProfile(userId: number): LlmProfileRow | undefined {
+  return getDb().prepare('SELECT * FROM llm_profiles WHERE user_id=?').get(userId) as unknown as
+    | LlmProfileRow
+    | undefined;
+}
+
+export function upsertLlmProfile(userId: number, baseUrl: string, apiKeyEnc: string, model: string): void {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO llm_profiles (user_id, base_url, api_key_enc, model, updated_at)
+       VALUES (?,?,?,?,?)
+       ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, api_key_enc=excluded.api_key_enc,
+         model=excluded.model, updated_at=excluded.updated_at`,
+    )
+    .run(userId, baseUrl, apiKeyEnc, model, now);
+}
+
+export function getQdrantProfile(userId: number): QdrantProfileRow | undefined {
+  return getDb().prepare('SELECT * FROM qdrant_profiles WHERE user_id=?').get(userId) as unknown as
+    | QdrantProfileRow
+    | undefined;
+}
+
+export function upsertQdrantProfile(
+  userId: number,
+  url: string,
+  apiKeyEnc: string | null,
+  collection: string,
+  vectorName: string | null,
+  topK: number,
+): void {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO qdrant_profiles (user_id, url, api_key_enc, collection, vector_name, top_k, updated_at)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT(user_id) DO UPDATE SET url=excluded.url, api_key_enc=excluded.api_key_enc,
+         collection=excluded.collection, vector_name=excluded.vector_name, top_k=excluded.top_k,
+         updated_at=excluded.updated_at`,
+    )
+    .run(userId, url, apiKeyEnc, collection, vectorName, topK, now);
+}
+
+export function insertAgentExtension(row: {
+  kind: string;
+  name: string;
+  enabled?: number;
+  config_json: string;
+  secrets_enc?: string | null;
+  file_dir?: string | null;
+}): AgentExtensionRow {
+  const now = Date.now();
+  try {
+    const info = getDb()
+      .prepare(
+        `INSERT INTO agent_extensions (kind, name, enabled, config_json, secrets_enc, file_dir, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(row.kind, row.name, row.enabled ?? 1, row.config_json, row.secrets_enc ?? null, row.file_dir ?? null, now, now);
+    return getAgentExtension(Number(info.lastInsertRowid))!;
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    if (msg.includes('UNIQUE')) throw Object.assign(new Error('扩展名称已存在'), { code: 'EXT_DUP' });
+    throw e;
+  }
+}
+
+export function getAgentExtension(id: number): AgentExtensionRow | undefined {
+  return getDb().prepare('SELECT * FROM agent_extensions WHERE id=?').get(id) as unknown as
+    | AgentExtensionRow
+    | undefined;
+}
+
+export function getAgentExtensionByName(kind: string, name: string): AgentExtensionRow | undefined {
+  return getDb().prepare('SELECT * FROM agent_extensions WHERE kind=? AND name=?').get(kind, name) as unknown as
+    | AgentExtensionRow
+    | undefined;
+}
+
+export function listAgentExtensions(kind?: string, q?: string): AgentExtensionRow[] {
+  if (kind && q) {
+    return getDb()
+      .prepare('SELECT * FROM agent_extensions WHERE kind=? AND name LIKE ? ORDER BY updated_at DESC')
+      .all(kind, `%${q}%`) as unknown as AgentExtensionRow[];
+  }
+  if (kind) {
+    return getDb()
+      .prepare('SELECT * FROM agent_extensions WHERE kind=? ORDER BY updated_at DESC')
+      .all(kind) as unknown as AgentExtensionRow[];
+  }
+  if (q) {
+    return getDb()
+      .prepare('SELECT * FROM agent_extensions WHERE name LIKE ? ORDER BY updated_at DESC')
+      .all(`%${q}%`) as unknown as AgentExtensionRow[];
+  }
+  return getDb().prepare('SELECT * FROM agent_extensions ORDER BY updated_at DESC').all() as unknown as AgentExtensionRow[];
+}
+
+export function listEnabledAgentExtensions(): AgentExtensionRow[] {
+  return getDb()
+    .prepare('SELECT * FROM agent_extensions WHERE enabled=1 ORDER BY id ASC')
+    .all() as unknown as AgentExtensionRow[];
+}
+
+export function updateAgentExtension(
+  id: number,
+  patch: {
+    name?: string;
+    enabled?: number;
+    config_json?: string;
+    secrets_enc?: string | null;
+    file_dir?: string | null;
+  },
+): AgentExtensionRow {
+  const cur = getAgentExtension(id);
+  if (!cur) throw Object.assign(new Error('扩展不存在'), { code: 'EXT_MISS' });
+  try {
+    getDb()
+      .prepare(
+        `UPDATE agent_extensions SET name=?, enabled=?, config_json=?, secrets_enc=?, file_dir=?, updated_at=? WHERE id=?`,
+      )
+      .run(
+        patch.name ?? cur.name,
+        patch.enabled ?? cur.enabled,
+        patch.config_json ?? cur.config_json,
+        patch.secrets_enc === undefined ? cur.secrets_enc : patch.secrets_enc,
+        patch.file_dir === undefined ? cur.file_dir : patch.file_dir,
+        Date.now(),
+        id,
+      );
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    if (msg.includes('UNIQUE')) throw Object.assign(new Error('扩展名称已存在'), { code: 'EXT_DUP' });
+    throw e;
+  }
+  return getAgentExtension(id)!;
+}
+
+export function deleteAgentExtension(id: number): boolean {
+  const r = getDb().prepare('DELETE FROM agent_extensions WHERE id=?').run(id);
+  return Number(r.changes) > 0;
+}
+
+export function createAgentConversation(userId: number, scene: string, title = ''): AgentConversationRow {
+  const now = Date.now();
+  const info = getDb()
+    .prepare(
+      'INSERT INTO agent_conversations (user_id, scene, title, created_at, updated_at) VALUES (?,?,?,?,?)',
+    )
+    .run(userId, scene, title, now, now);
+  return getAgentConversation(userId, Number(info.lastInsertRowid))!;
+}
+
+export function getAgentConversation(userId: number, id: number): AgentConversationRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM agent_conversations WHERE id=? AND user_id=?')
+    .get(id, userId) as unknown as AgentConversationRow | undefined;
+}
+
+export function listAgentConversations(userId: number, scene?: string): AgentConversationRow[] {
+  if (scene) {
+    return getDb()
+      .prepare(
+        'SELECT * FROM agent_conversations WHERE user_id=? AND scene=? ORDER BY updated_at DESC',
+      )
+      .all(userId, scene) as unknown as AgentConversationRow[];
+  }
+  return getDb()
+    .prepare('SELECT * FROM agent_conversations WHERE user_id=? ORDER BY updated_at DESC')
+    .all(userId) as unknown as AgentConversationRow[];
+}
+
+export function touchAgentConversation(userId: number, id: number, title?: string): void {
+  if (title !== undefined) {
+    getDb()
+      .prepare('UPDATE agent_conversations SET title=?, updated_at=? WHERE id=? AND user_id=?')
+      .run(title, Date.now(), id, userId);
+    return;
+  }
+  getDb()
+    .prepare('UPDATE agent_conversations SET updated_at=? WHERE id=? AND user_id=?')
+    .run(Date.now(), id, userId);
+}
+
+export function deleteAgentConversation(userId: number, id: number): boolean {
+  const d = getDb();
+  const row = getAgentConversation(userId, id);
+  if (!row) return false;
+  d.exec('BEGIN');
+  try {
+    d.prepare('DELETE FROM agent_traces WHERE conversation_id=? AND user_id=?').run(id, userId);
+    d.prepare('DELETE FROM agent_turns WHERE conversation_id=? AND user_id=?').run(id, userId);
+    d.prepare('DELETE FROM agent_conversations WHERE id=? AND user_id=?').run(id, userId);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return true;
+}
+
+export function insertAgentTurn(row: {
+  conversation_id: number;
+  user_id: number;
+  role: string;
+  content: string;
+  draft_md?: string | null;
+  trace_id?: string | null;
+}): AgentTurnRow {
+  const now = Date.now();
+  const info = getDb()
+    .prepare(
+      `INSERT INTO agent_turns (conversation_id, user_id, role, content, draft_md, trace_id, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(row.conversation_id, row.user_id, row.role, row.content, row.draft_md ?? null, row.trace_id ?? null, now);
+  return getDb().prepare('SELECT * FROM agent_turns WHERE id=?').get(Number(info.lastInsertRowid)) as unknown as AgentTurnRow;
+}
+
+export function listAgentTurns(userId: number, conversationId: number): AgentTurnRow[] {
+  return getDb()
+    .prepare('SELECT * FROM agent_turns WHERE conversation_id=? AND user_id=? ORDER BY id ASC')
+    .all(conversationId, userId) as unknown as AgentTurnRow[];
+}
+
+export function getAgentTurn(userId: number, conversationId: number, turnId: number): AgentTurnRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM agent_turns WHERE id=? AND conversation_id=? AND user_id=?')
+    .get(turnId, conversationId, userId) as unknown as AgentTurnRow | undefined;
+}
+
+export function insertAgentTrace(row: AgentTraceRow): void {
+  getDb()
+    .prepare(
+      `INSERT INTO agent_traces (trace_id, user_id, conversation_id, turn_id, model, input_tokens, output_tokens, latency_ms, hits_json, spans_json, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      row.trace_id,
+      row.user_id,
+      row.conversation_id,
+      row.turn_id,
+      row.model,
+      row.input_tokens,
+      row.output_tokens,
+      row.latency_ms,
+      row.hits_json,
+      row.spans_json,
+      row.created_at,
+    );
+}
+
+export function getAgentTrace(userId: number, traceId: string): AgentTraceRow | undefined {
+  return getDb().prepare('SELECT * FROM agent_traces WHERE trace_id=? AND user_id=?').get(traceId, userId) as unknown as
+    | AgentTraceRow
+    | undefined;
+}
+
+export function getAgentTraceByTurn(userId: number, conversationId: number, turnId: number): AgentTraceRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM agent_traces WHERE user_id=? AND conversation_id=? AND turn_id=?')
+    .get(userId, conversationId, turnId) as unknown as AgentTraceRow | undefined;
 }
