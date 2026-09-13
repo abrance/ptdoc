@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { HttpError } from './http.ts';
 
 let db: DatabaseSync | null = null;
 
@@ -260,6 +262,33 @@ function migrateAgentTables(): void {
   `);
 }
 
+function migrateArchiveSchema(): void {
+  const d = getDb();
+  try {
+    d.exec('ALTER TABLE docs ADD COLUMN archive_path TEXT');
+  } catch {
+    /* 列已存在则忽略 */
+  }
+  try {
+    d.exec('ALTER TABLE shares ADD COLUMN source_content_sha256 TEXT');
+  } catch {
+    /* 列已存在则忽略 */
+  }
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS archive_folders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      path TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, path)
+    );
+  `);
+  d.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_archive_path ON docs(user_id, archive_path) WHERE archive_path IS NOT NULL',
+  );
+  d.exec('CREATE INDEX IF NOT EXISTS idx_archive_folders_user ON archive_folders(user_id)');
+}
+
 /** 初始化 SQLite。dbFile 缺省为项目根 data/ptdoc.db。重复调用安全。 */
 export function initDB(dbFile?: string): void {
   if (db) return;
@@ -338,6 +367,7 @@ export function initDB(dbFile?: string): void {
   }
   migrateToMultiUser();
   migrateAgentTables();
+  migrateArchiveSchema();
 }
 
 export function closeDB(): void {
@@ -824,9 +854,17 @@ export function insertShare(
   const now = Date.now();
   const info = getDb()
     .prepare(
-      'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, created_at) VALUES (?,?,?,?,?,?)',
+      'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, source_content_sha256, created_at) VALUES (?,?,?,?,?,?,?)',
     )
-    .run(userId, docKey, shareMd, mdUrl ?? null, htmlUrl ?? null, now);
+    .run(
+      userId,
+      docKey,
+      shareMd,
+      mdUrl ?? null,
+      htmlUrl ?? null,
+      htmlUrl ? contentSha256(userId, docKey) : null,
+      now,
+    );
   const shareId = Number(info.lastInsertRowid);
   const stmt = getDb().prepare(
     'INSERT INTO images (share_id, qiniu_key, url, mermaid_hash, created_at) VALUES (?,?,?,?,?)',
@@ -834,6 +872,7 @@ export function insertShare(
   for (const im of images) {
     stmt.run(shareId, im.qiniu_key, im.url, im.mermaid_hash ?? null, now);
   }
+  if (htmlUrl && docKey) ensureArchivePath(userId, docKey);
   return { id: shareId };
 }
 
@@ -896,10 +935,13 @@ export function listShares(userId: number, docKey?: string): ShareRow[] {
 
 /** 上传分享版 HTML 成功后，把永久公开链接回写对应分享记录。 */
 export function updateShareHtmlUrl(userId: number, shareId: number, htmlUrl: string): void {
-  const r = getDb()
-    .prepare('UPDATE shares SET html_url=? WHERE id=? AND user_id=?')
-    .run(htmlUrl, shareId, userId);
-  if (Number(r.changes) === 0) throw new Error('分享记录不存在');
+  const share = getShare(userId, shareId);
+  if (!share) throw new Error('分享记录不存在');
+  const hash = htmlUrl ? contentSha256(userId, share.doc_key) : null;
+  getDb()
+    .prepare('UPDATE shares SET html_url=?, source_content_sha256=? WHERE id=? AND user_id=?')
+    .run(htmlUrl || null, hash, shareId, userId);
+  if (htmlUrl && share.doc_key) ensureArchivePath(userId, share.doc_key);
 }
 
 /** 取分享记录的图片映射（按发布顺序），供前端做"当前文档 vs 上次发布"一致性检查。 */
@@ -1257,4 +1299,343 @@ export function getAgentTraceByTurn(userId: number, conversationId: number, turn
   return getDb()
     .prepare('SELECT * FROM agent_traces WHERE user_id=? AND conversation_id=? AND turn_id=?')
     .get(userId, conversationId, turnId) as unknown as AgentTraceRow | undefined;
+}
+
+// ─── 归档目录树 ─────────────────────────────────────────
+
+export interface ArchiveEntry {
+  id: number;
+  doc_key: string;
+  title: string;
+  archive_path: string;
+  share_id: number;
+  html_url: string;
+  md_url: string | null;
+  created_at: number;
+  stale: boolean;
+}
+
+export interface ArchiveFolder {
+  id: number;
+  path: string;
+  created_at: number;
+}
+
+function sha256Text(s: string): string {
+  return createHash('sha256').update(s, 'utf8').digest('hex');
+}
+
+function contentSha256(userId: number, docKey: string | null): string | null {
+  if (!docKey) return null;
+  const row = getDb()
+    .prepare('SELECT content FROM docs WHERE user_id=? AND doc_key=?')
+    .get(userId, docKey) as { content: string } | undefined;
+  if (!row) return null;
+  return sha256Text(row.content);
+}
+
+type PathKind = 'doc' | 'folder';
+
+function pairConflict(
+  a: { path: string; kind: PathKind },
+  b: { path: string; kind: PathKind },
+): 'dup' | 'prefix' | null {
+  if (a.path === b.path) return 'dup';
+  if (a.kind === 'doc' && b.path.startsWith(a.path + '/')) return 'prefix';
+  if (b.kind === 'doc' && a.path.startsWith(b.path + '/')) return 'prefix';
+  return null;
+}
+
+export function normalizeArchivePath(raw: unknown): string {
+  if (typeof raw !== 'string') throw new HttpError(400, '路径非法：须为字符串');
+  const path = raw.trim().replace(/^\/+|\/+$/g, '');
+  assertValidArchivePath(path);
+  return path;
+}
+
+function assertValidArchivePath(path: string): void {
+  if (path.length < 1 || path.length > 256) {
+    throw new HttpError(400, '路径非法：去掉首尾 / 与空白后长度须为 1～256');
+  }
+  if (/[\x00-\x1f]/.test(path)) {
+    throw new HttpError(400, '路径非法：禁止控制字符');
+  }
+  for (const seg of path.split('/')) {
+    if (!seg) throw new HttpError(400, '路径非法：禁止空分段');
+    if (seg === '.' || seg === '..') throw new HttpError(400, '路径非法：禁止 . 与 ..');
+  }
+}
+
+function listOccupiedPaths(
+  userId: number,
+  exclude?: { docId?: number; folderPath?: string },
+): { docs: Array<{ id: number; path: string }>; folders: string[] } {
+  const docRows = getDb()
+    .prepare(
+      'SELECT id, archive_path FROM docs WHERE user_id=? AND archive_path IS NOT NULL AND archive_path != \'\'',
+    )
+    .all(userId) as Array<{ id: number; archive_path: string }>;
+  const docs = docRows
+    .filter((r) => r.id !== exclude?.docId)
+    .map((r) => ({ id: r.id, path: r.archive_path }));
+  const folders = (
+    getDb().prepare('SELECT path FROM archive_folders WHERE user_id=?').all(userId) as Array<{ path: string }>
+  )
+    .map((r) => r.path)
+    .filter((p) => p !== exclude?.folderPath);
+  return { docs, folders };
+}
+
+function assertNoPathConflict(
+  userId: number,
+  path: string,
+  kind: PathKind,
+  exclude?: { docId?: number; folderPath?: string },
+): void {
+  const occupied = listOccupiedPaths(userId, exclude);
+  const items: Array<{ path: string; kind: PathKind }> = [
+    ...occupied.docs.map((d) => ({ path: d.path, kind: 'doc' as const })),
+    ...occupied.folders.map((f) => ({ path: f, kind: 'folder' as const })),
+    { path, kind },
+  ];
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const c = pairConflict(items[i], items[j]);
+      if (c === 'dup') throw new HttpError(409, '归档路径已被占用');
+      if (c === 'prefix') throw new HttpError(409, '同一路径不能既是文档又是文件夹');
+    }
+  }
+}
+
+function tryAssignArchivePath(userId: number, docId: number, path: string): boolean {
+  try {
+    assertValidArchivePath(path);
+    assertNoPathConflict(userId, path, 'doc', { docId });
+    getDb().prepare('UPDATE docs SET archive_path=? WHERE id=? AND user_id=?').run(path, docId, userId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 若文档尚无 archive_path，写入 doc_key；冲突则改用 doc_key~id。 */
+export function ensureArchivePath(userId: number, docKey: string): void {
+  const doc = getDb()
+    .prepare('SELECT id, archive_path FROM docs WHERE user_id=? AND doc_key=?')
+    .get(userId, docKey) as { id: number; archive_path: string | null } | undefined;
+  if (!doc || doc.archive_path) return;
+  if (tryAssignArchivePath(userId, doc.id, docKey)) return;
+  if (tryAssignArchivePath(userId, doc.id, `${docKey}~${doc.id}`)) return;
+  for (let n = 2; n < 50; n++) {
+    if (tryAssignArchivePath(userId, doc.id, `${docKey}~${doc.id}~${n}`)) return;
+  }
+}
+
+function hasPublishedShare(userId: number, docKey: string): boolean {
+  const row = getDb()
+    .prepare(
+      `SELECT id FROM shares
+       WHERE user_id=? AND doc_key=? AND html_url IS NOT NULL AND html_url != ''
+       LIMIT 1`,
+    )
+    .get(userId, docKey) as { id: number } | undefined;
+  return Boolean(row);
+}
+
+export function listArchiveFolders(userId: number): ArchiveFolder[] {
+  return getDb()
+    .prepare('SELECT id, path, created_at FROM archive_folders WHERE user_id=? ORDER BY path ASC')
+    .all(userId) as unknown as ArchiveFolder[];
+}
+
+export function listArchive(userId: number, q?: string): { entries: ArchiveEntry[]; folders: ArchiveFolder[] } {
+  const shareRows = getDb()
+    .prepare(
+      `SELECT id, doc_key, html_url, md_url, created_at, source_content_sha256
+       FROM shares
+       WHERE user_id=? AND html_url IS NOT NULL AND html_url != ''
+         AND doc_key IS NOT NULL AND doc_key != ''
+       ORDER BY created_at DESC, id DESC`,
+    )
+    .all(userId) as Array<{
+    id: number;
+    doc_key: string;
+    html_url: string;
+    md_url: string | null;
+    created_at: number;
+    source_content_sha256: string | null;
+  }>;
+  const latest = new Map<string, (typeof shareRows)[number]>();
+  for (const s of shareRows) {
+    if (!latest.has(s.doc_key)) latest.set(s.doc_key, s);
+  }
+
+  const docs = getDb()
+    .prepare('SELECT id, doc_key, title, content, archive_path FROM docs WHERE user_id=?')
+    .all(userId) as Array<{
+    id: number;
+    doc_key: string;
+    title: string;
+    content: string;
+    archive_path: string | null;
+  }>;
+  const docByKey = new Map(docs.map((d) => [d.doc_key, d]));
+
+  const entries: ArchiveEntry[] = [];
+  for (const [docKey, share] of latest) {
+    const doc = docByKey.get(docKey);
+    if (!doc) continue;
+    if (!doc.archive_path) {
+      ensureArchivePath(userId, docKey);
+      const again = getDb()
+        .prepare('SELECT archive_path FROM docs WHERE id=?')
+        .get(doc.id) as { archive_path: string | null };
+      doc.archive_path = again.archive_path;
+    }
+    if (!doc.archive_path) continue;
+    const stale = Boolean(
+      share.source_content_sha256 && sha256Text(doc.content) !== share.source_content_sha256,
+    );
+    entries.push({
+      id: doc.id,
+      doc_key: doc.doc_key,
+      title: doc.title,
+      archive_path: doc.archive_path,
+      share_id: share.id,
+      html_url: share.html_url,
+      md_url: share.md_url,
+      created_at: share.created_at,
+      stale,
+    });
+  }
+
+  let folders = listArchiveFolders(userId);
+  const needle = q?.trim().toLowerCase();
+  let filtered = entries;
+  if (needle) {
+    filtered = entries.filter(
+      (e) => e.title.toLowerCase().includes(needle) || e.archive_path.toLowerCase().includes(needle),
+    );
+    folders = folders.filter(
+      (f) =>
+        f.path.toLowerCase().includes(needle) ||
+        filtered.some((e) => e.archive_path === f.path || e.archive_path.startsWith(f.path + '/')),
+    );
+  }
+  return { entries: filtered, folders };
+}
+
+export function updateArchivePath(userId: number, docId: number, archivePath: string): { ok: boolean } {
+  const path = normalizeArchivePath(archivePath);
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '不存在');
+  if (!hasPublishedShare(userId, doc.doc_key)) throw new HttpError(400, '文档尚未归档');
+  assertNoPathConflict(userId, path, 'doc', { docId });
+  getDb().prepare('UPDATE docs SET archive_path=? WHERE id=? AND user_id=?').run(path, docId, userId);
+  return { ok: true };
+}
+
+export function createArchiveFolder(userId: number, rawPath: unknown): ArchiveFolder {
+  const path = normalizeArchivePath(rawPath);
+  assertNoPathConflict(userId, path, 'folder');
+  const now = Date.now();
+  const info = getDb()
+    .prepare('INSERT INTO archive_folders (user_id, path, created_at) VALUES (?,?,?)')
+    .run(userId, path, now);
+  return { id: Number(info.lastInsertRowid), path, created_at: now };
+}
+
+function replacePathPrefix(path: string, from: string, to: string): string {
+  if (path === from) return to;
+  if (path.startsWith(from + '/')) return to + path.slice(from.length);
+  return path;
+}
+
+export function renameArchiveFolder(userId: number, rawFrom: unknown, rawTo: unknown): { ok: boolean } {
+  const from = normalizeArchivePath(rawFrom);
+  const to = normalizeArchivePath(rawTo);
+  if (from === to) return { ok: true };
+
+  const folders = listArchiveFolders(userId);
+  const docRows = getDb()
+    .prepare(
+      'SELECT id, archive_path FROM docs WHERE user_id=? AND archive_path IS NOT NULL AND archive_path != \'\'',
+    )
+    .all(userId) as Array<{ id: number; archive_path: string }>;
+
+  const inSubtree = (p: string) => p === from || p.startsWith(from + '/');
+  const movingFolders = folders.filter((f) => inSubtree(f.path));
+  const movingDocs = docRows.filter((d) => inSubtree(d.archive_path));
+  if (movingFolders.length === 0 && movingDocs.length === 0) {
+    throw new HttpError(404, '文件夹不存在');
+  }
+
+  const newFolderPaths = movingFolders.map((f) => replacePathPrefix(f.path, from, to));
+  const newDocPaths = movingDocs.map((d) => replacePathPrefix(d.archive_path, from, to));
+  for (const p of [...newFolderPaths, ...newDocPaths]) assertValidArchivePath(p);
+
+  const outsideFolders = folders.filter((f) => !inSubtree(f.path)).map((f) => f.path);
+  const outsideDocs = docRows.filter((d) => !inSubtree(d.archive_path)).map((d) => d.archive_path);
+  const nextAll: Array<{ path: string; kind: PathKind }> = [
+    ...outsideFolders.map((p) => ({ path: p, kind: 'folder' as const })),
+    ...outsideDocs.map((p) => ({ path: p, kind: 'doc' as const })),
+    ...newFolderPaths.map((p) => ({ path: p, kind: 'folder' as const })),
+    ...newDocPaths.map((p) => ({ path: p, kind: 'doc' as const })),
+  ];
+  for (let i = 0; i < nextAll.length; i++) {
+    for (let j = i + 1; j < nextAll.length; j++) {
+      const c = pairConflict(nextAll[i], nextAll[j]);
+      if (c === 'dup') throw new HttpError(409, '归档路径已被占用');
+      if (c === 'prefix') throw new HttpError(409, '同一路径不能既是文档又是文件夹');
+    }
+  }
+
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    for (const f of movingFolders) {
+      d.prepare('UPDATE archive_folders SET path=? WHERE id=? AND user_id=?').run(
+        replacePathPrefix(f.path, from, to),
+        f.id,
+        userId,
+      );
+    }
+    for (const doc of movingDocs) {
+      d.prepare('UPDATE docs SET archive_path=? WHERE id=? AND user_id=?').run(
+        replacePathPrefix(doc.archive_path, from, to),
+        doc.id,
+        userId,
+      );
+    }
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    if (String(e).includes('UNIQUE')) throw new HttpError(409, '归档路径已被占用');
+    throw e;
+  }
+  return { ok: true };
+}
+
+export function deleteArchiveFolder(userId: number, rawPath: unknown): { ok: boolean } {
+  const path = normalizeArchivePath(rawPath);
+  const row = getDb()
+    .prepare('SELECT id FROM archive_folders WHERE user_id=? AND path=?')
+    .get(userId, path) as { id: number } | undefined;
+  const child = getDb()
+    .prepare(
+      `SELECT d.id FROM docs d
+       WHERE d.user_id=? AND d.archive_path IS NOT NULL
+         AND (d.archive_path=? OR d.archive_path LIKE ?)
+         AND EXISTS (
+           SELECT 1 FROM shares s
+           WHERE s.user_id=d.user_id AND s.doc_key=d.doc_key
+             AND s.html_url IS NOT NULL AND s.html_url != ''
+         )
+       LIMIT 1`,
+    )
+    .get(userId, path, path + '/%') as { id: number } | undefined;
+  if (child) throw new HttpError(400, '文件夹内还有归档文档');
+  if (!row) throw new HttpError(404, '文件夹不存在');
+  getDb().prepare('DELETE FROM archive_folders WHERE id=? AND user_id=?').run(row.id, userId);
+  return { ok: true };
 }

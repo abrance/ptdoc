@@ -30,6 +30,14 @@
         <path d="M8 6V4h8v2" />
         <path d="M19 6l-1 14H6L5 6" />
       </symbol>
+      <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 13a5 5 0 0 0 7.07 0l1.41-1.41a5 5 0 0 0-7.07-7.07L10 5.93" />
+        <path d="M14 11a5 5 0 0 0-7.07 0L5.52 12.41a5 5 0 0 0 7.07 7.07L14 18.07" />
+      </symbol>
+      <symbol id="i-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+        <path d="M14 3v5h5" />
+      </symbol>
     </svg>
     <div class="app">
       <header class="topbar">
@@ -77,7 +85,11 @@
       </header>
       <div class="workspace" id="workspace">
         <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
-        <aside id="sidebar" class="sidebar">
+        <aside id="sidebar" class="sidebar" data-mode="draft">
+          <div class="sidebar-tabs" role="tablist" aria-label="侧栏视图">
+            <button id="sidebar-tab-draft" class="sidebar-tab active" type="button" role="tab" aria-selected="true">草稿</button>
+            <button id="sidebar-tab-archive" class="sidebar-tab" type="button" role="tab" aria-selected="false">归档</button>
+          </div>
           <div class="sidebar-head">
             <input id="sidebar-search" type="search" placeholder="过滤文档…" aria-label="过滤文档" />
             <button id="sidebar-new" class="icon-btn" type="button" title="新建文档" aria-label="新建文档">
