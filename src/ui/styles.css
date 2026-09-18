@@ -680,6 +680,45 @@ body.resizing {
   white-space: nowrap;
 }
 
+.tree-qdrant {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.tree-qdrant-none {
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.tree-qdrant-stale {
+  color: #b45309;
+  background: #fff7ed;
+}
+
+.tree-qdrant-synced {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.tree-qdrant-btn {
+  flex-shrink: 0;
+  gap: 2px;
+  width: auto;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.tree-qdrant-btn .icon {
+  width: 12px;
+  height: 12px;
+}
+
 .tree-ops {
   display: none;
   gap: 2px;

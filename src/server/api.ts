@@ -36,6 +36,7 @@ import {
   deleteArchiveFolder,
 } from './db';
 import { parseStorageInput, saveVerifiedProfile, toPublicProfile, verifyConnectivity } from './storage';
+import { syncArchiveToQdrant } from './archive-qdrant';
 
 /**
  * 文档/分享/媒体/存储 REST 接口。除公开静态资源外均需登录，数据按 Current User 隔离。
@@ -111,6 +112,10 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       if (archivePathMatch && req.method === 'POST') {
         const b = await readJson(req);
         return sendJson(res, 200, updateArchivePath(uid, Number(archivePathMatch[1]), b.archive_path));
+      }
+      const qdrantSyncMatch = url.match(/^\/api\/docs\/(\d+)\/qdrant-sync$/);
+      if (qdrantSyncMatch && req.method === 'POST') {
+        return sendJson(res, 200, await syncArchiveToQdrant(uid, Number(qdrantSyncMatch[1])));
       }
 
       const snapMatch = url.match(/^\/api\/docs\/(\d+)\/snapshots$/);

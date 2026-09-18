@@ -19,6 +19,7 @@ interface ArchiveEntry {
   md_url: string | null;
   created_at: number;
   stale: boolean;
+  qdrant_sync: 'none' | 'synced' | 'stale';
 }
 
 interface ArchiveFolder {
@@ -27,6 +28,7 @@ interface ArchiveFolder {
 }
 
 type SidebarMode = 'draft' | 'archive';
+type QdrantSyncStatus = 'none' | 'synced' | 'stale';
 
 interface FolderNode {
   type: 'folder';
@@ -35,7 +37,7 @@ interface FolderNode {
   children: TreeNode[];
 }
 
-type TreeDoc = SidebarDoc & { path: string; html_url?: string; stale?: boolean };
+type TreeDoc = SidebarDoc & { path: string; html_url?: string; stale?: boolean; qdrant_sync?: QdrantSyncStatus };
 type TreeNode = FolderNode | { type: 'doc'; doc: TreeDoc };
 
 interface SidebarOptions {
@@ -92,6 +94,21 @@ function buildTree(docs: TreeDoc[], extraFolders: string[] = []): TreeNode[] {
   return roots;
 }
 
+function qdrantBadge(mode: SidebarMode, status?: QdrantSyncStatus): string {
+  if (mode !== 'archive' || !status) return '';
+  const label = status === 'synced' ? '已同步' : status === 'stale' ? '待同步' : '未同步';
+  const title =
+    status === 'synced'
+      ? '归档 Markdown 已写入知识库'
+      : status === 'stale'
+        ? '归档已更新，知识库仍是旧版'
+        : '尚未写入知识库';
+  return `<span class="tree-qdrant tree-qdrant-${status}" title="${title}">${label}</span>
+    <button class="tree-op tree-qdrant-btn" data-op="qdrant-sync" type="button" title="同步到知识库" aria-label="同步到知识库">
+      <svg class="icon"><use href="#i-sync"></use></svg>同步
+    </button>`;
+}
+
 function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIElement {
   const li = document.createElement('li');
   li.className = 'tree-doc' + (doc.doc_key === currentKey ? ' current' : '');
@@ -100,6 +117,7 @@ function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIE
   const stale = mode === 'archive' && doc.stale
     ? '<span class="tree-stale" title="草稿已改，尚未重新生成分享版">有未发布改动</span>'
     : '';
+  const qdrant = qdrantBadge(mode, doc.qdrant_sync);
   const ops =
     mode === 'archive'
       ? `<button class="tree-op" data-op="move" title="移动" aria-label="移动"><svg class="icon"><use href="#i-pencil"></use></svg></button>
@@ -110,6 +128,7 @@ function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIE
   li.innerHTML = `
     <span class="tree-label" title="${esc(mode === 'archive' ? doc.path : doc.doc_key)}">${esc(doc.title)}</span>
     ${stale}
+    ${qdrant}
     <span class="tree-ops">
       ${ops}
     </span>`;
@@ -173,6 +192,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       path: e.archive_path,
       html_url: e.html_url,
       stale: e.stale,
+      qdrant_sync: e.qdrant_sync,
     }));
 
   const paintTree = (docs: TreeDoc[], extraFolders: string[], emptyHtml: string, treeMode: SidebarMode): void => {
@@ -468,6 +488,10 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
         }
         return;
       }
+      if (op === 'qdrant-sync') {
+        await syncQdrant(id);
+        return;
+      }
       const doc = allDocs.find((d) => d.id === id);
       if (!doc) return;
       if (op === 'rename') await renameDoc(doc);
@@ -536,6 +560,19 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       await refresh();
     } catch (err) {
       alert('移动失败：' + (err as Error).message);
+    }
+  };
+
+  const syncQdrant = async (id: number): Promise<void> => {
+    opts.onStatus?.('正在同步到知识库…');
+    try {
+      const res = await fetch(`/api/docs/${id}/qdrant-sync`, { method: 'POST' });
+      if (!res.ok) throw new Error(await readError(res));
+      const data = (await res.json()) as { chunks?: number };
+      opts.onStatus?.(`已同步到知识库（${data.chunks ?? 0} 段）`);
+      await refresh();
+    } catch (err) {
+      opts.onStatus?.('同步失败：' + (err as Error).message, true);
     }
   };
 
