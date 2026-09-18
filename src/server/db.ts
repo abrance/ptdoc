@@ -287,6 +287,16 @@ function migrateArchiveSchema(): void {
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_archive_path ON docs(user_id, archive_path) WHERE archive_path IS NOT NULL',
   );
   d.exec('CREATE INDEX IF NOT EXISTS idx_archive_folders_user ON archive_folders(user_id)');
+  try {
+    d.exec('ALTER TABLE docs ADD COLUMN qdrant_sync_share_id INTEGER');
+  } catch {
+    /* 列已存在则忽略 */
+  }
+  try {
+    d.exec('ALTER TABLE docs ADD COLUMN qdrant_synced_at INTEGER');
+  } catch {
+    /* 列已存在则忽略 */
+  }
 }
 
 /** 初始化 SQLite。dbFile 缺省为项目根 data/ptdoc.db。重复调用安全。 */
@@ -1303,6 +1313,8 @@ export function getAgentTraceByTurn(userId: number, conversationId: number, turn
 
 // ─── 归档目录树 ─────────────────────────────────────────
 
+export type QdrantSyncStatus = 'none' | 'synced' | 'stale';
+
 export interface ArchiveEntry {
   id: number;
   doc_key: string;
@@ -1313,6 +1325,8 @@ export interface ArchiveEntry {
   md_url: string | null;
   created_at: number;
   stale: boolean;
+  qdrant_sync: QdrantSyncStatus;
+  qdrant_synced_at: number | null;
 }
 
 export interface ArchiveFolder {
@@ -1471,13 +1485,17 @@ export function listArchive(userId: number, q?: string): { entries: ArchiveEntry
   }
 
   const docs = getDb()
-    .prepare('SELECT id, doc_key, title, content, archive_path FROM docs WHERE user_id=?')
+    .prepare(
+      'SELECT id, doc_key, title, content, archive_path, qdrant_sync_share_id, qdrant_synced_at FROM docs WHERE user_id=?',
+    )
     .all(userId) as Array<{
     id: number;
     doc_key: string;
     title: string;
     content: string;
     archive_path: string | null;
+    qdrant_sync_share_id: number | null;
+    qdrant_synced_at: number | null;
   }>;
   const docByKey = new Map(docs.map((d) => [d.doc_key, d]));
 
@@ -1506,6 +1524,12 @@ export function listArchive(userId: number, q?: string): { entries: ArchiveEntry
       md_url: share.md_url,
       created_at: share.created_at,
       stale,
+      qdrant_sync: !doc.qdrant_sync_share_id
+        ? 'none'
+        : doc.qdrant_sync_share_id === share.id
+          ? 'synced'
+          : 'stale',
+      qdrant_synced_at: doc.qdrant_synced_at ?? null,
     });
   }
 
@@ -1523,6 +1547,14 @@ export function listArchive(userId: number, q?: string): { entries: ArchiveEntry
     );
   }
   return { entries: filtered, folders };
+}
+
+export function markQdrantSynced(userId: number, docId: number, shareId: number): void {
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '不存在');
+  getDb()
+    .prepare('UPDATE docs SET qdrant_sync_share_id=?, qdrant_synced_at=? WHERE id=? AND user_id=?')
+    .run(shareId, Date.now(), docId, userId);
 }
 
 export function updateArchivePath(userId: number, docId: number, archivePath: string): { ok: boolean } {

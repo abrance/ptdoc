@@ -54,7 +54,8 @@ export function initSettingsPanel(opts: {
         <button type="button" id="llm-save">保存大模型</button>
         <h3>知识库（Qdrant）</h3>
         <p class="settings-hint" id="qdrant-hint"></p>
-        <label>URL<input name="qdrant_url" placeholder="http://qdrant:6333" /></label>
+        <p class="settings-hint">归档「同步」把分享版 Markdown 写入该 collection。使用 ptdoc-qdrant-gateway 时 URL 填网关地址。</p>
+        <label>URL<input name="qdrant_url" placeholder="http://ptdoc-qdrant-gateway:8080" /></label>
         <label>Collection<input name="qdrant_collection" /></label>
         <label>Vector 名（可选）<input name="qdrant_vector" /></label>
         <label>top-k<input name="qdrant_topk" type="number" min="1" max="20" value="5" /></label>
