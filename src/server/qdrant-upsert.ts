@@ -18,6 +18,7 @@ export interface UpsertArchiveOpts {
   mdUrl: string | null;
   htmlUrl: string;
   markdown: string;
+  vectorName?: string;
 }
 
 export type QdrantUpsertFn = (opts: {
@@ -27,6 +28,7 @@ export type QdrantUpsertFn = (opts: {
   points: TextPoint[];
   docKey: string;
   userId: number;
+  vectorName?: string;
 }) => Promise<void>;
 
 const TEXT_NOT_ENABLED = '该 collection 未启用服务端向量化';
@@ -89,6 +91,31 @@ export function buildPoints(opts: UpsertArchiveOpts, chunks: string[]): TextPoin
   }));
 }
 
+/** Qdrant Cloud Inference / FastEmbed: Document `{ text }` lets the collection embed server-side. */
+export function toQdrantUpsertPoints(
+  points: TextPoint[],
+  vectorName?: string,
+): Array<{ id: string; vector: Record<string, unknown>; payload: Record<string, unknown> }> {
+  const name = vectorName?.trim();
+  return points.map((p) => {
+    const document = { text: p.text };
+    return {
+      id: p.id,
+      vector: name ? { [name]: document } : document,
+      payload: p.payload,
+    };
+  });
+}
+
+function isJsonFormatError(text: string): boolean {
+  return /unknown field|deserialize|json body|format error|expected one of/i.test(text);
+}
+
+function isInferenceDisabledError(text: string): boolean {
+  if (isJsonFormatError(text)) return false;
+  return /inference|embedding|text query|document|fastembed|vectorization|not enabled/i.test(text);
+}
+
 async function qdrantJson(
   url: string,
   apiKey: string | undefined,
@@ -126,7 +153,8 @@ async function defaultUpsert(opts: {
   points: TextPoint[];
   docKey: string;
   userId: number;
-}): Promise<void> {
+  vectorName?: string;
+ }): Promise<void> {
   const col = encodeURIComponent(opts.collection);
   await qdrantJson(opts.url, opts.apiKey, 'POST', `/collections/${col}/points/delete?wait=true`, {
     filter: {
@@ -139,15 +167,21 @@ async function defaultUpsert(opts: {
 
   if (opts.points.length === 0) return;
 
-  const put = await qdrantJson(opts.url, opts.apiKey, 'PUT', `/collections/${col}/points?wait=true`, {
-    points: opts.points,
+  const putPath = `/collections/${col}/points?wait=true`;
+  const inference = await qdrantJson(opts.url, opts.apiKey, 'PUT', putPath, {
+    points: toQdrantUpsertPoints(opts.points, opts.vectorName),
   });
-  if (!put.ok) {
-    if (put.status === 400 || /inference|embedding|text query|document|unknown field/i.test(put.text)) {
-      throw new HttpError(400, TEXT_NOT_ENABLED);
-    }
-    throw new HttpError(400, '知识库写入失败');
+  if (inference.ok) return;
+
+  const gateway = await qdrantJson(opts.url, opts.apiKey, 'PUT', putPath, {
+    points: opts.points.map((p) => ({ id: p.id, text: p.text, payload: p.payload })),
+  });
+  if (gateway.ok) return;
+
+  if (isInferenceDisabledError(inference.text) || isInferenceDisabledError(gateway.text)) {
+    throw new HttpError(400, TEXT_NOT_ENABLED);
   }
+  throw new HttpError(400, '知识库写入失败');
 }
 
 export async function upsertArchiveMarkdown(opts: UpsertArchiveOpts): Promise<{ chunks: number }> {
@@ -161,6 +195,7 @@ export async function upsertArchiveMarkdown(opts: UpsertArchiveOpts): Promise<{ 
     points,
     docKey: opts.docKey,
     userId: opts.userId,
+    vectorName: opts.vectorName,
   });
   return { chunks: points.length };
 }

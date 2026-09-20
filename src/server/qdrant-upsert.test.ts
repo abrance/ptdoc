@@ -15,7 +15,15 @@ import {
   upsertQdrantProfile,
 } from './db.ts';
 import { encryptSecret } from './storage.ts';
-import { buildPoints, chunkMarkdown, pointId, setQdrantUpsertForTests, upsertArchiveMarkdown } from './qdrant-upsert.ts';
+import { HttpError } from './http.ts';
+import {
+  buildPoints,
+  chunkMarkdown,
+  pointId,
+  setQdrantUpsertForTests,
+  toQdrantUpsertPoints,
+  upsertArchiveMarkdown,
+} from './qdrant-upsert.ts';
 import { syncArchiveToQdrant } from './archive-qdrant.ts';
 
 const GOOD = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -95,6 +103,153 @@ test('同步成功后 listArchive.qdrant_sync 为 synced，新分享后变 stale
   assert.equal(listArchive(u.id).entries[0].qdrant_sync, 'stale');
   markQdrantSynced(u.id, d.id, listArchive(u.id).entries[0].share_id);
   assert.equal(listArchive(u.id).entries[0].qdrant_sync, 'synced');
+  setQdrantUpsertForTests(null);
+  closeDB();
+});
+
+test('toQdrantUpsertPoints 无 vector 名时写入 Document text', () => {
+  const pts = toQdrantUpsertPoints([{ id: '1', text: 'hello', payload: { a: 1 } }]);
+  assert.deepEqual(pts[0].vector, { text: 'hello' });
+  assert.equal(pts[0].payload.a, 1);
+  assert.ok(!('text' in pts[0]));
+});
+
+test('toQdrantUpsertPoints 有 vector 名时用 named Document', () => {
+  const pts = toQdrantUpsertPoints([{ id: '1', text: 'hello', payload: {} }], 'dense');
+  assert.deepEqual(pts[0].vector, { dense: { text: 'hello' } });
+});
+
+const SAMPLE_UPSERT = {
+  url: 'http://qdrant.example',
+  collection: 'col',
+  userId: 1,
+  docKey: 'a.md',
+  title: 'A',
+  archivePath: 'a.md',
+  mdUrl: null as string | null,
+  htmlUrl: 'https://x',
+  markdown: 'hello',
+};
+
+async function withMockFetch(
+  handler: (url: string, method: string, body: Record<string, unknown>) => { status: number; body: string },
+  run: () => Promise<void>,
+): Promise<Array<{ url: string; method: string; body: Record<string, unknown> }>> {
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = String(init?.method || 'GET');
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    calls.push({ url, method, body });
+    const r = handler(url, method, body);
+    return new Response(r.body, { status: r.status, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await run();
+  } finally {
+    globalThis.fetch = orig;
+    setQdrantUpsertForTests(null);
+  }
+  return calls;
+}
+
+test('defaultUpsert 发送 vector.text 而不是顶层 text', async () => {
+  setQdrantUpsertForTests(null);
+  const calls = await withMockFetch(
+    () => ({ status: 200, body: '{"status":"ok"}' }),
+    async () => {
+      await upsertArchiveMarkdown(SAMPLE_UPSERT);
+    },
+  );
+  const put = calls.find((c) => c.method === 'PUT');
+  assert.ok(put);
+  const points = (put!.body.points as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(points.vector, { text: 'hello' });
+  assert.equal(points.text, undefined);
+});
+
+test('defaultUpsert 带 vectorName 时写入 named Document', async () => {
+  setQdrantUpsertForTests(null);
+  const calls = await withMockFetch(
+    () => ({ status: 200, body: '{"status":"ok"}' }),
+    async () => {
+      await upsertArchiveMarkdown({ ...SAMPLE_UPSERT, vectorName: 'dense' });
+    },
+  );
+  const put = calls.find((c) => c.method === 'PUT');
+  const points = (put!.body.points as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(points.vector, { dense: { text: 'hello' } });
+});
+
+test('inference 格式被拒后回退 gateway 的 text 字段', async () => {
+  setQdrantUpsertForTests(null);
+  let puts = 0;
+  const calls = await withMockFetch(
+    (_url, method) => {
+      if (method === 'PUT') {
+        puts += 1;
+        if (puts === 1) return { status: 400, body: '{"status":{"error":"unknown field `vector`"}}' };
+        return { status: 200, body: '{"status":"ok"}' };
+      }
+      return { status: 200, body: '{"status":"ok"}' };
+    },
+    async () => {
+      await upsertArchiveMarkdown(SAMPLE_UPSERT);
+    },
+  );
+  const putsCalls = calls.filter((c) => c.method === 'PUT');
+  assert.equal(putsCalls.length, 2);
+  assert.equal((putsCalls[1].body.points as Array<Record<string, unknown>>)[0].text, 'hello');
+});
+
+test('unknown field 不再误报未启用服务端向量化', async () => {
+  setQdrantUpsertForTests(null);
+  await assert.rejects(
+    () =>
+      withMockFetch(
+        () => ({ status: 400, body: '{"status":{"error":"unknown field `text`"}}' }),
+        async () => {
+          await upsertArchiveMarkdown(SAMPLE_UPSERT);
+        },
+      ),
+    (err: unknown) => err instanceof HttpError && err.message === '知识库写入失败',
+  );
+});
+
+test('真正未启用 inference 时仍报服务端向量化', async () => {
+  setQdrantUpsertForTests(null);
+  await assert.rejects(
+    () =>
+      withMockFetch(
+        (_url, method) => {
+          if (method === 'PUT') {
+            return { status: 400, body: '{"status":{"error":"inference is not enabled for this collection"}}' };
+          }
+          return { status: 200, body: '{}' };
+        },
+        async () => {
+          await upsertArchiveMarkdown(SAMPLE_UPSERT);
+        },
+      ),
+    (err: unknown) => err instanceof HttpError && err.message === '该 collection 未启用服务端向量化',
+  );
+});
+
+test('同步把 profile.vector_name 传给 upsert', async () => {
+  resetServerEnvForTests();
+  loadServerEnv({ PTDOC_DATA_KEY: GOOD });
+  initDB(join(mkdtempSync(join(tmpdir(), 'ptdoc-')), 't.db'));
+  const u = createUser('bob', 'hash', 'member');
+  const d = upsertDoc(u.id, 'a.md', 'A', 'a.md', '# a');
+  insertShare(u.id, 'a.md', '# a', [], undefined, 'https://qiniu.example/a.html');
+  upsertQdrantProfile(u.id, 'http://q', encryptSecret('k'), 'col', 'dense', 5);
+  let seen: string | undefined;
+  setQdrantUpsertForTests(async (opts) => {
+    seen = opts.vectorName;
+  });
+  await syncArchiveToQdrant(u.id, d.id);
+  assert.equal(seen, 'dense');
   setQdrantUpsertForTests(null);
   closeDB();
 });

@@ -25,6 +25,7 @@ export async function syncArchiveToQdrant(
     mdUrl: entry.md_url,
     htmlUrl: entry.html_url,
     markdown: share.share_md,
+    vectorName: profile.vector_name || undefined,
   });
   markQdrantSynced(userId, docId, entry.share_id);
   const again = listArchive(userId).entries.find((e) => e.id === docId);
