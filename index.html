@@ -44,6 +44,14 @@
         <path d="M3 12a9 9 0 0 0 15.5 6.3" />
         <path d="M18.5 18.3V15H15" />
       </symbol>
+      <symbol id="i-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="5" cy="12" r="1.2" fill="currentColor" />
+        <circle cx="12" cy="12" r="1.2" fill="currentColor" />
+        <circle cx="19" cy="12" r="1.2" fill="currentColor" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 6 6 18M6 6l12 12" />
+      </symbol>
     </svg>
     <div class="app">
       <header class="topbar">
@@ -63,26 +71,29 @@
           <button id="view-preview" type="button" role="tab" aria-selected="false" data-view="preview">预览</button>
         </div>
         <div class="actions">
-          <div class="action-group">
-            <button id="open-md" type="button">打开</button>
-            <button id="upload-img" type="button">上传图片</button>
-            <button id="media" type="button">媒体库</button>
+          <button id="share" class="btn-primary" type="button">发布<span id="share-badge" class="share-badge" hidden></span></button>
+          <button id="agent" type="button">智能体</button>
+          <button id="media" type="button">媒体</button>
+          <div class="menu" id="more-menu">
+            <button id="more-toggle" class="icon-btn" type="button" title="更多" aria-label="更多" aria-expanded="false" aria-haspopup="menu">
+              <svg class="icon"><use href="#i-more"></use></svg>
+            </button>
+            <div class="menu-pop" role="menu" hidden>
+              <button id="open-md" type="button" role="menuitem">打开本地</button>
+              <button id="toc-toggle" type="button" role="menuitem">目录</button>
+              <button id="snapshots" type="button" role="menuitem">快照</button>
+              <button id="share-list" type="button" role="menuitem">分享记录</button>
+            </div>
           </div>
-          <div class="action-group">
-            <button id="share" class="btn-primary" type="button">生成分享版<span id="share-badge" class="share-badge" hidden></span></button>
-            <button id="share-list" type="button">分享记录</button>
-          </div>
-          <div class="action-group action-secondary">
-            <button id="toc-toggle" type="button">目录</button>
-            <button id="snapshots" type="button">快照</button>
-            <button id="history" type="button">历史</button>
-            <button id="agent" type="button">智能体</button>
-          </div>
-          <div class="action-group action-account">
-            <button id="settings" type="button">设置</button>
-            <button id="admin" type="button" hidden>账号</button>
-            <span id="whoami" class="whoami" hidden></span>
-            <button id="logout" type="button" hidden>退出</button>
+          <div class="menu" id="account-menu">
+            <button id="account-toggle" class="account-btn" type="button" title="账号" aria-label="账号菜单" aria-expanded="false" aria-haspopup="menu">
+              <span id="whoami" class="whoami">账号</span>
+            </button>
+            <div class="menu-pop" role="menu" hidden>
+              <button id="settings" type="button" role="menuitem">设置</button>
+              <button id="admin" type="button" role="menuitem" hidden>平台管理</button>
+              <button id="logout" type="button" role="menuitem" hidden>退出</button>
+            </div>
           </div>
         </div>
         <input type="file" id="md-input" accept=".md,.markdown" hidden />

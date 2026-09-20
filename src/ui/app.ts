@@ -12,6 +12,9 @@ import { startGate, logout, type SessionUser } from './gate';
 import { initSettingsPanel } from './settings';
 import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
+import { showToast } from './toast';
+import { closeDrawers, openExclusive } from './panels';
+import { askConfirm, askText } from './dialog';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -29,8 +32,6 @@ let currentDocKey = 'default';
 let currentFilename = 'index.md';
 let renderTimer: number | undefined;
 let saveTimer: number | undefined;
-// 当前分享弹窗对应的 shares 记录 id（上传 HTML 成功后回写 html_url 用）
-let currentShareId: number | null = null;
 // 发布一致性检查：当前文档最近一次发布的基准 + 最近一次对比结果
 let publishBaseline: PublishBaseline | null = null;
 let lastPublishDiff: PublishDiff | null = null;
@@ -41,6 +42,7 @@ type DocSourceKind = 'disk' | 'snapshot' | 'default';
 let currentDocSource: { kind: DocSourceKind; label: string; reason: string } | null = null;
 // 侧边栏文档树实例（打开/重命名后刷新高亮）
 let sidebarRef: { refresh: () => Promise<void> } | null = null;
+let mediaPanelRef: { toggle: () => void; refresh: () => Promise<void> } | null = null;
 // 当前文档在 docs 表中的 id（快照等按 id 的操作依赖；随自动保存更新）
 let currentDocId: number | null = null;
 
@@ -71,6 +73,10 @@ function scheduleRender(): void {
 function setStatus(msg: string, isError = false): void {
   statusEl.textContent = msg;
   statusEl.className = 'status' + (isError ? ' error' : '');
+}
+function notify(msg: string, isError = false): void {
+  setStatus(msg, isError);
+  showToast(msg, isError ? 'error' : 'info');
 }
 
 /** 更新顶栏的当前文档内容来源标记（标签 + 悬停原因）。 */
@@ -134,6 +140,37 @@ function setSidebarOpen(open: boolean): void {
   btn.title = open ? '折叠侧边栏' : '展开侧边栏';
 }
 
+function closeMenus(): void {
+  for (const id of ['more-menu', 'account-menu']) {
+    const root = $(id);
+    root.classList.remove('open');
+    const btn = root.querySelector(':scope > button') as HTMLButtonElement | null;
+    const pop = root.querySelector('.menu-pop') as HTMLElement | null;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    if (pop) pop.hidden = true;
+  }
+}
+
+function initMenus(): void {
+  for (const id of ['more-menu', 'account-menu']) {
+    const root = $(id);
+    const btn = root.querySelector(':scope > button') as HTMLButtonElement;
+    const pop = root.querySelector('.menu-pop') as HTMLElement;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = pop.hidden;
+      closeMenus();
+      if (willOpen) {
+        root.classList.add('open');
+        pop.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    });
+    pop.addEventListener('click', () => closeMenus());
+  }
+  document.addEventListener('click', closeMenus);
+}
+
 function initLayoutChrome(): void {
   setWorkspaceView(isMobileLayout() ? 'edit' : 'split');
   setSidebarOpen(!isMobileLayout());
@@ -177,6 +214,7 @@ function initLayoutChrome(): void {
       $('sidebar-backdrop').hidden = true;
     }
   });
+  initMenus();
 }
 
 // ─── 预览区目录 TOC ─────────────────────────────────────
@@ -356,7 +394,6 @@ function loadContent(docKey: string, filename: string, content: string): void {
 }
 
 // ─── 上传图片到七牛图床 ─────────────────────────────────
-$('upload-img').addEventListener('click', () => imgInput.click());
 imgInput.addEventListener('change', async () => {
   const file = imgInput.files?.[0];
   if (!file) return;
@@ -372,6 +409,7 @@ async function uploadImage(file: File): Promise<void> {
     insertAtCursor(`\n![${file.name}](${data.url})\n`);
     setStatus('已上传：' + data.url);
     render();
+    void mediaPanelRef?.refresh();
   } catch (e) {
     setStatus('上传失败：' + (e as Error).message, true);
   } finally {
@@ -596,97 +634,68 @@ async function generateShare(): Promise<void> {
     /* 忽略离线 */
   }
 
-  showShareModal(result, shareId);
+  showShareModal(result, htmlUrl, mdUrl);
   const reused = cacheHits > 0 ? `，复用缓存 ${cacheHits} 张` : '';
   setStatus(`已生成分享版（${images.length} 张图${reused}，.md 与 .html 已上传七牛）并记录到数据库`);
   setTimeout(() => setProgress(null), 500);
 }
 
 // ─── 分享结果弹窗 ───────────────────────────────────────
-function showShareModal(shareMd: string, shareId?: number | null): void {
-  currentShareId = shareId ?? null;
-  let modal = document.getElementById('share-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'share-modal';
-    modal.className = 'modal-backdrop';
-    modal.innerHTML = `
-      <div class="modal">
-        <div class="modal-head">
-          <span>分享版 Markdown（图片已替换为远程链接）</span>
-          <button id="share-close" type="button">✕</button>
-        </div>
-        <textarea id="share-text" readonly spellcheck="false"></textarea>
+function showShareModal(shareMd: string, htmlUrl?: string, mdUrl?: string): void {
+  document.getElementById('share-modal')?.remove();
+  const publicUrl = htmlUrl || mdUrl || '';
+  const modal = document.createElement('div');
+  modal.id = 'share-modal';
+  modal.className = 'modal-backdrop open';
+  modal.innerHTML = `
+    <div class="modal share-modal">
+      <div class="modal-head">
+        <span>已发布</span>
+        <button id="share-close" type="button" class="icon-btn" aria-label="关闭">
+          <svg class="icon"><use href="#i-close"></use></svg>
+        </button>
+      </div>
+      <p class="share-lead">公开链接已生成，可直接发给读者。</p>
+      <div class="share-link-box" id="share-url">${escapeHtml(publicUrl) || '链接稍后可在分享记录中查看'}</div>
+      <textarea id="share-text" hidden readonly spellcheck="false"></textarea>
       <div class="modal-foot">
-        <button id="share-upload" type="button">上传 HTML 到七牛</button>
+        <button id="share-copy-link" type="button" class="btn-primary"${publicUrl ? '' : ' disabled'}>复制链接</button>
+        <button id="share-copy" type="button">复制 Markdown</button>
         <button id="share-dl-html" type="button">下载 HTML</button>
-        <button id="share-copy" type="button">复制</button>
         <button id="share-download" type="button">下载 .md</button>
       </div>
-      </div>`;
-    document.body.appendChild(modal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) modal!.remove();
-    });
-    $('share-close').addEventListener('click', () => modal!.remove());
-    $('share-copy').addEventListener('click', async () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      await navigator.clipboard.writeText(t.value);
-      setStatus('已复制到剪贴板');
-    });
-    $('share-download').addEventListener('click', () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([t.value], { type: 'text/markdown' }));
-      a.download = (currentFilename || 'doc') + '.share.md';
-      a.click();
-    });
-    $('share-dl-html').addEventListener('click', () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      const html = buildShareHtmlDoc(t.value, deriveTitle(t.value, currentFilename));
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-      a.download = (currentFilename || 'doc') + '.share.html';
-      a.click();
-    });
-    $('share-upload').addEventListener('click', () => uploadShareHtml());
-  }
+    </div>`;
+  document.body.appendChild(modal);
   (modal.querySelector('#share-text') as HTMLTextAreaElement).value = shareMd;
-  modal.classList.add('open');
-}
-
-/** 上传分享版 HTML 到七牛，复制永久 URL，并把链接回写 shares 表对应记录。 */
-async function uploadShareHtml(): Promise<void> {
-  const text = ($('share-text') as HTMLTextAreaElement).value;
-  setStatus('正在上传 HTML 到七牛…');
-  setProgress(0);
-  try {
-    const html = buildShareHtmlDoc(text);
-    const buf = await new Blob([html], { type: 'text/html' }).arrayBuffer();
-    const fname = `share-${Date.now()}.html`;
-    const up = await uploadBinary(buf, fname, setProgress, 'share', 'share');
-    setProgress(1);
-    await navigator.clipboard.writeText(up.url);
-    if (currentShareId != null) {
-      try {
-        await fetch(`/api/share/${currentShareId}/html`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ html_url: up.url }),
-        });
-        setStatus('已上传，永久链接已复制并入库：' + up.url);
-        void sidebarRef?.refresh();
-      } catch {
-        setStatus('已上传，永久链接已复制：' + up.url + '（记录入库失败）');
-      }
-    } else {
-      setStatus('已上传并复制永久链接：' + up.url);
-    }
-  } catch (e) {
-    setStatus('上传失败：' + (e as Error).message, true);
-  } finally {
-    setTimeout(() => setProgress(null), 400);
-  }
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+  $('share-close').addEventListener('click', () => modal.remove());
+  $('share-copy-link').addEventListener('click', async () => {
+    if (!publicUrl) return;
+    await navigator.clipboard.writeText(publicUrl);
+    setStatus('已复制公开链接');
+  });
+  $('share-copy').addEventListener('click', async () => {
+    const t = $('share-text') as HTMLTextAreaElement;
+    await navigator.clipboard.writeText(t.value);
+    setStatus('已复制 Markdown');
+  });
+  $('share-download').addEventListener('click', () => {
+    const t = $('share-text') as HTMLTextAreaElement;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([t.value], { type: 'text/markdown' }));
+    a.download = (currentFilename || 'doc') + '.share.md';
+    a.click();
+  });
+  $('share-dl-html').addEventListener('click', () => {
+    const t = $('share-text') as HTMLTextAreaElement;
+    const html = buildShareHtmlDoc(t.value, deriveTitle(t.value, currentFilename));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    a.download = (currentFilename || 'doc') + '.share.html';
+    a.click();
+  });
 }
 
 // ─── 文档互链（预览内 .md 相对链接站内跳转）─────────────
@@ -745,21 +754,20 @@ async function openInternalLink(href: string): Promise<void> {
 }
 
 // ─── 历史 / 搜索 ────────────────────────────────────────
-$('history').addEventListener('click', toggleHistory);
 
 // 当前列表（供键盘上下选择 / 补全）
 let historyItems: Array<{ id: number; doc_key: string }> = [];
 let historyActive = -1;
 
 function toggleHistory(): void {
-  const drawer = ensureHistoryDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) {
+  openExclusive('history-drawer', () => {
+    const drawer = ensureHistoryDrawer();
+    drawer.classList.add('open');
     const search = $('history-search') as HTMLInputElement;
     search.value = '';
     search.focus();
     refreshHistory('');
-  }
+  });
 }
 
 function ensureHistoryDrawer(): HTMLElement {
@@ -991,9 +999,11 @@ interface ShareRow {
 }
 
 function toggleShareListDrawer(): void {
-  const drawer = ensureShareListDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) void refreshShareList();
+  openExclusive('share-list-drawer', () => {
+    const drawer = ensureShareListDrawer();
+    drawer.classList.add('open');
+    void refreshShareList();
+  });
 }
 
 function ensureShareListDrawer(): HTMLElement {
@@ -1140,7 +1150,12 @@ function viewShareMd(id: number): void {
 }
 
 async function deleteShareRecord(id: number): Promise<void> {
-  if (!confirm('删除这条分享记录？\n仅删除本地记录，七牛上已发布的 HTML 仍可访问。')) return;
+  const ok = await askConfirm('删除这条分享记录？\n仅删除本地记录，七牛上已发布的 HTML 仍可访问。', {
+    title: '删除分享',
+    confirmLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const res = await fetch(`/api/share/${id}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1163,9 +1178,11 @@ interface SnapshotRow {
 $('snapshots').addEventListener('click', toggleSnapshotDrawer);
 
 function toggleSnapshotDrawer(): void {
-  const drawer = ensureSnapshotDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) void refreshSnapshots();
+  openExclusive('snapshot-drawer', () => {
+    const drawer = ensureSnapshotDrawer();
+    drawer.classList.add('open');
+    void refreshSnapshots();
+  });
 }
 
 function ensureSnapshotDrawer(): HTMLElement {
@@ -1237,7 +1254,14 @@ async function saveSnapshot(): Promise<void> {
     setStatus('请先保存或打开一篇文档', true);
     return;
   }
-  const label = prompt('快照标签（可留空，如 v1 评审稿）', '')?.trim() || undefined;
+  const raw = await askText({
+    title: '保存快照',
+    label: '标签（可留空，如 v1 评审稿）',
+    value: '',
+    confirmLabel: '保存',
+  });
+  if (raw == null) return;
+  const label = raw.trim() || undefined;
   try {
     const res = await fetch(`/api/docs/${currentDocId}/snapshots`, {
       method: 'POST',
@@ -1286,7 +1310,11 @@ function previewSnapshot(snap: SnapshotRow): void {
 
 async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
   if (currentDocId == null) return;
-  if (!confirm(`恢复到「${snap.label || '未命名'}」？\n将覆盖当前内容，系统会先自动保留一个"恢复前"快照。`)) return;
+  const ok = await askConfirm(`恢复到「${snap.label || '未命名'}」？\n将覆盖当前内容，系统会先自动保留一个"恢复前"快照。`, {
+    title: '恢复快照',
+    confirmLabel: '恢复',
+  });
+  if (!ok) return;
   try {
     // 恢复前自动留一个兜底快照
     await fetch(`/api/docs/${currentDocId}/snapshots`, {
@@ -1308,7 +1336,12 @@ async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
 }
 
 async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
-  if (!confirm('删除该快照？不影响当前文档内容。')) return;
+  const ok = await askConfirm('删除该快照？不影响当前文档内容。', {
+    title: '删除快照',
+    confirmLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}`, { method: 'DELETE' });
     setStatus('已删除快照');
@@ -1329,6 +1362,10 @@ editor.addEventListener('input', () => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeMenus();
+    closeDrawers();
+  }
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) {
     e.preventDefault();
     toggleHistory();
@@ -1353,16 +1390,17 @@ void startGate((user: SessionUser) => {
   preview.innerHTML = '';
 
   const who = $('whoami');
-  who.hidden = false;
   who.textContent = user.username + (user.role === 'admin' ? ' · 管理员' : '');
   $('logout').hidden = false;
   $('logout').onclick = () => void logout();
 
-  const settings = initSettingsPanel({ onStatus: setStatus });
-  $('settings').addEventListener('click', () => settings.toggle());
+  const settings = initSettingsPanel({ onStatus: notify });
+  $('settings').addEventListener('click', () => {
+    openExclusive('settings-drawer', () => settings.toggle());
+  });
 
   const agent = initAgentChat({
-    onStatus: setStatus,
+    onStatus: notify,
     getCurrentDocId: () => currentDocId,
     insertAtCursor: (text) => {
       insertAtCursor(text);
@@ -1374,12 +1412,16 @@ void startGate((user: SessionUser) => {
       if (mode === 'replace-current' && docId) void openDocById(docId);
     },
   });
-  $('agent').addEventListener('click', () => agent.toggle());
+  $('agent').addEventListener('click', () => {
+    openExclusive('agent-drawer', () => agent.toggle());
+  });
 
   if (user.role === 'admin') {
     $('admin').hidden = false;
-    const admin = initAdminPanel({ onStatus: setStatus });
-    $('admin').addEventListener('click', () => admin.toggle());
+    const admin = initAdminPanel({ onStatus: notify });
+    $('admin').addEventListener('click', () => {
+      openExclusive('admin-drawer', () => admin.toggle());
+    });
   }
 
   const mediaPanel = initMediaPanel({
@@ -1387,9 +1429,13 @@ void startGate((user: SessionUser) => {
       insertAtCursor(`\n![${filename}](${url})\n`);
       render();
     },
-    onStatus: setStatus,
+    onStatus: notify,
+    onUpload: () => imgInput.click(),
   });
-  $('media').addEventListener('click', () => mediaPanel.toggle());
+  mediaPanelRef = mediaPanel;
+  $('media').addEventListener('click', () => {
+    openExclusive('media-drawer', () => mediaPanel.toggle());
+  });
 
   sidebarRef = initSidebar({
     onOpen: (id) => {
@@ -1397,7 +1443,7 @@ void startGate((user: SessionUser) => {
       if (isMobileLayout()) setSidebarOpen(false);
     },
     getCurrentKey: () => currentDocKey,
-    onStatus: setStatus,
+    onStatus: notify,
     onRenamed: (oldKey, newKey) => {
       if (currentDocKey === oldKey) {
         currentDocKey = newKey;
@@ -1405,7 +1451,7 @@ void startGate((user: SessionUser) => {
         void refreshPublishBaseline();
         syncChrome();
       }
-      setStatus('已重命名为：' + newKey);
+      notify('已重命名为：' + newKey);
     },
   });
 

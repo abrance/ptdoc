@@ -9,6 +9,22 @@ interface StoragePublic {
   verified: boolean;
 }
 
+function setFeedback(id: string, msg: string, isError = false): void {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'settings-feedback' + (msg ? (isError ? ' err' : ' ok') : '');
+}
+
+async function withBusy(btn: HTMLElement | null, fn: () => Promise<void>): Promise<void> {
+  if (btn instanceof HTMLButtonElement) btn.disabled = true;
+  try {
+    await fn();
+  } finally {
+    if (btn instanceof HTMLButtonElement) btn.disabled = false;
+  }
+}
+
 export function initSettingsPanel(opts: {
   onStatus: (msg: string, isError?: boolean) => void;
 }): { toggle: () => void } {
@@ -22,61 +38,106 @@ export function initSettingsPanel(opts: {
     drawer.innerHTML = `
       <div class="drawer-head">
         <span class="drawer-title">设置</span>
-        <button id="settings-close" type="button">✕</button>
+        <button id="settings-close" class="icon-btn" type="button" aria-label="关闭">
+          <svg class="icon"><use href="#i-close"></use></svg>
+        </button>
+      </div>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button type="button" role="tab" data-tab="storage" class="active" aria-selected="true">对象存储</button>
+        <button type="button" role="tab" data-tab="agent" aria-selected="false">智能体</button>
+        <button type="button" role="tab" data-tab="account" aria-selected="false">账号</button>
       </div>
       <form id="settings-form" class="settings-form">
-        <h3>对象存储（七牛云）</h3>
-        <p class="settings-hint" id="storage-hint"></p>
-        <label>AccessKey<input name="access_key" autocomplete="off" /></label>
-        <label>SecretKey<input name="secret_key" type="password" autocomplete="off" placeholder="" /></label>
-        <label>Bucket<input name="bucket" /></label>
-        <label>Domain<input name="domain" placeholder="https://cdn.example.com" /></label>
-        <label>区域
-          <select name="zone">
-            <option value="Zone_z0">华东 Zone_z0</option>
-            <option value="Zone_z1">华北 Zone_z1</option>
-            <option value="Zone_z2">华南 Zone_z2</option>
-            <option value="Zone_na0">北美 Zone_na0</option>
-            <option value="Zone_as0">东南亚 Zone_as0</option>
-          </select>
-        </label>
-        <label class="chk"><input name="private_bucket" type="checkbox" /> 私有桶</label>
-        <label>签名有效期（秒）<input name="url_ttl" type="number" min="60" value="3600" /></label>
-        <div class="settings-ops">
-          <button type="button" id="storage-test">测试连通性</button>
-        <button type="submit">保存</button>
-      </div>
-        <h3>大模型（OpenAI 兼容）</h3>
-        <p class="settings-hint" id="llm-hint"></p>
-        <label>Base URL<input name="llm_base_url" placeholder="https://api.deepseek.com/v1" /></label>
-        <label>模型名<input name="llm_model" placeholder="deepseek-chat" /></label>
-        <label>API Key<input name="llm_api_key" type="password" autocomplete="off" /></label>
-        <button type="button" id="llm-save">保存大模型</button>
-        <h3>知识库（Qdrant）</h3>
-        <p class="settings-hint" id="qdrant-hint"></p>
-        <p class="settings-hint">归档「同步」把分享版 Markdown 写入该 collection。使用 ptdoc-qdrant-gateway 时 URL 填网关地址。</p>
-        <label>URL<input name="qdrant_url" placeholder="http://ptdoc-qdrant-gateway:8080" /></label>
-        <label>Collection<input name="qdrant_collection" /></label>
-        <label>Vector 名（可选）<input name="qdrant_vector" /></label>
-        <label>top-k<input name="qdrant_topk" type="number" min="1" max="20" value="5" /></label>
-        <label>API Key<input name="qdrant_api_key" type="password" autocomplete="off" /></label>
-        <button type="button" id="qdrant-save">保存知识库</button>
-      <h3>修改密码</h3>
-        <label>原密码<input name="old_password" type="password" autocomplete="current-password" /></label>
-        <label>新密码<input name="new_password" type="password" autocomplete="new-password" /></label>
-        <button type="button" id="password-save">更新密码</button>
+        <section class="settings-pane" data-pane="storage">
+          <p class="settings-hint" id="storage-hint"></p>
+          <label>AccessKey<input name="access_key" autocomplete="off" /></label>
+          <label>SecretKey<input name="secret_key" type="password" autocomplete="off" /></label>
+          <label>Bucket<input name="bucket" /></label>
+          <label>Domain<input name="domain" placeholder="https://cdn.example.com" /></label>
+          <label>区域
+            <select name="zone">
+              <option value="Zone_z0">华东 Zone_z0</option>
+              <option value="Zone_z1">华北 Zone_z1</option>
+              <option value="Zone_z2">华南 Zone_z2</option>
+              <option value="Zone_na0">北美 Zone_na0</option>
+              <option value="Zone_as0">东南亚 Zone_as0</option>
+            </select>
+          </label>
+          <label class="chk"><input name="private_bucket" type="checkbox" /> 私有桶</label>
+          <label>签名有效期（秒）<input name="url_ttl" type="number" min="60" value="3600" /></label>
+          <p class="settings-feedback" id="storage-feedback"></p>
+          <div class="settings-ops">
+            <button type="button" id="storage-test">测试连通性</button>
+            <button type="button" id="storage-save" class="btn-primary">保存</button>
+          </div>
+        </section>
+        <section class="settings-pane" data-pane="agent" hidden>
+          <h3>大模型（OpenAI 兼容）</h3>
+          <p class="settings-hint" id="llm-hint"></p>
+          <label>Base URL<input name="llm_base_url" placeholder="https://api.deepseek.com/v1" /></label>
+          <label>模型名<input name="llm_model" placeholder="deepseek-chat" /></label>
+          <label>API Key<input name="llm_api_key" type="password" autocomplete="off" /></label>
+          <p class="settings-feedback" id="llm-feedback"></p>
+          <div class="settings-ops">
+            <button type="button" id="llm-save" class="btn-primary">保存大模型</button>
+          </div>
+          <h3>知识库（Qdrant）</h3>
+          <p class="settings-hint" id="qdrant-hint"></p>
+          <p class="settings-hint">归档「同步」写入该 collection。URL 填 ptdoc-qdrant-gateway 地址，例如 http://ptdoc-qdrant-gateway:8080</p>
+          <label>URL<input name="qdrant_url" placeholder="http://ptdoc-qdrant-gateway:8080" /></label>
+          <label>Collection<input name="qdrant_collection" /></label>
+          <label>Vector 名（可选）<input name="qdrant_vector" /></label>
+          <label>top-k<input name="qdrant_topk" type="number" min="1" max="20" value="5" /></label>
+          <label>API Key<input name="qdrant_api_key" type="password" autocomplete="off" /></label>
+          <p class="settings-feedback" id="qdrant-feedback"></p>
+          <div class="settings-ops">
+            <button type="button" id="qdrant-save" class="btn-primary">保存知识库</button>
+          </div>
+        </section>
+        <section class="settings-pane" data-pane="account" hidden>
+          <label>原密码<input name="old_password" type="password" autocomplete="current-password" /></label>
+          <label>新密码<input name="new_password" type="password" autocomplete="new-password" /></label>
+          <p class="settings-feedback" id="password-feedback"></p>
+          <div class="settings-ops">
+            <button type="button" id="password-save" class="btn-primary">更新密码</button>
+          </div>
+        </section>
       </form>`;
     document.body.appendChild(drawer);
     document.getElementById('settings-close')!.addEventListener('click', () => drawer!.classList.remove('open'));
-    document.getElementById('storage-test')!.addEventListener('click', () => void test());
-    document.getElementById('password-save')!.addEventListener('click', () => void changePassword());
-    document.getElementById('llm-save')!.addEventListener('click', () => void saveLlm());
-    document.getElementById('qdrant-save')!.addEventListener('click', () => void saveQdrant());
+    drawer.querySelectorAll('.settings-tabs [data-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => setTab((btn as HTMLElement).dataset.tab || 'storage'));
+    });
+    document.getElementById('storage-test')!.addEventListener('click', (e) => {
+      void withBusy(e.currentTarget as HTMLElement, test);
+    });
+    document.getElementById('password-save')!.addEventListener('click', (e) => {
+      void withBusy(e.currentTarget as HTMLElement, changePassword);
+    });
+    document.getElementById('llm-save')!.addEventListener('click', (e) => {
+      void withBusy(e.currentTarget as HTMLElement, saveLlm);
+    });
+    document.getElementById('qdrant-save')!.addEventListener('click', (e) => {
+      void withBusy(e.currentTarget as HTMLElement, saveQdrant);
+    });
+    document.getElementById('storage-save')!.addEventListener('click', (e) => {
+      void withBusy(e.currentTarget as HTMLElement, save);
+    });
     (document.getElementById('settings-form') as HTMLFormElement).addEventListener('submit', (e) => {
       e.preventDefault();
-      void save();
     });
     return drawer;
+  };
+
+  const setTab = (tab: string): void => {
+    drawer!.querySelectorAll('.settings-tabs [data-tab]').forEach((b) => {
+      const on = (b as HTMLElement).dataset.tab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    drawer!.querySelectorAll('.settings-pane').forEach((p) => {
+      (p as HTMLElement).hidden = (p as HTMLElement).dataset.pane !== tab;
+    });
   };
 
   const collect = () => {
@@ -123,9 +184,12 @@ export function initSettingsPanel(opts: {
       });
       const j = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(j.error || '测试失败');
+      setFeedback('storage-feedback', '对象存储连通性正常');
       opts.onStatus('对象存储连通性正常');
     } catch (e) {
-      opts.onStatus((e as Error).message, true);
+      const msg = (e as Error).message;
+      setFeedback('storage-feedback', msg, true);
+      opts.onStatus(msg, true);
     }
   };
 
@@ -138,10 +202,13 @@ export function initSettingsPanel(opts: {
       });
       const j = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(j.error || '保存失败');
+      setFeedback('storage-feedback', '对象存储配置已保存');
       opts.onStatus('对象存储配置已保存');
       await fill();
     } catch (e) {
-      opts.onStatus((e as Error).message, true);
+      const msg = (e as Error).message;
+      setFeedback('storage-feedback', msg, true);
+      opts.onStatus(msg, true);
     }
   };
 
@@ -191,7 +258,12 @@ export function initSettingsPanel(opts: {
       body: JSON.stringify(body),
     });
     const j = (await res.json()) as { error?: string };
-    if (!res.ok) return opts.onStatus(j.error || '保存失败', true);
+    if (!res.ok) {
+      setFeedback('llm-feedback', j.error || '保存失败', true);
+      opts.onStatus(j.error || '保存失败', true);
+      return;
+    }
+    setFeedback('llm-feedback', '大模型配置已保存');
     opts.onStatus('大模型配置已保存');
     await fillLlm();
   };
@@ -212,7 +284,12 @@ export function initSettingsPanel(opts: {
       body: JSON.stringify(body),
     });
     const j = (await res.json()) as { error?: string };
-    if (!res.ok) return opts.onStatus(j.error || '保存失败', true);
+    if (!res.ok) {
+      setFeedback('qdrant-feedback', j.error || '保存失败', true);
+      opts.onStatus(j.error || '保存失败', true);
+      return;
+    }
+    setFeedback('qdrant-feedback', '知识库配置已保存');
     opts.onStatus('知识库配置已保存');
     await fillQdrant();
   };
@@ -229,9 +306,14 @@ export function initSettingsPanel(opts: {
       });
       const j = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(j.error || '改密失败');
+      setFeedback('password-feedback', '密码已更新');
       opts.onStatus('密码已更新');
+      (form.elements.namedItem('old_password') as HTMLInputElement).value = '';
+      (form.elements.namedItem('new_password') as HTMLInputElement).value = '';
     } catch (e) {
-      opts.onStatus((e as Error).message, true);
+      const msg = (e as Error).message;
+      setFeedback('password-feedback', msg, true);
+      opts.onStatus(msg, true);
     }
   };
 

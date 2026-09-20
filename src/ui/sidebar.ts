@@ -1,4 +1,5 @@
 import { removeHandle } from './fileHandles';
+import { askConfirm, askText } from './dialog';
 
 // ─── 文档树（按 doc_key 的 "/" 分段构建可折叠树）────────────────
 
@@ -94,19 +95,64 @@ function buildTree(docs: TreeDoc[], extraFolders: string[] = []): TreeNode[] {
   return roots;
 }
 
-function qdrantBadge(mode: SidebarMode, status?: QdrantSyncStatus): string {
-  if (mode !== 'archive' || !status) return '';
-  const label = status === 'synced' ? '已同步' : status === 'stale' ? '待同步' : '未同步';
-  const title =
-    status === 'synced'
-      ? '归档 Markdown 已写入知识库'
-      : status === 'stale'
-        ? '归档已更新，知识库仍是旧版'
-        : '尚未写入知识库';
-  return `<span class="tree-qdrant tree-qdrant-${status}" title="${title}">${label}</span>
-    <button class="tree-op tree-qdrant-btn" data-op="qdrant-sync" type="button" title="同步到知识库" aria-label="同步到知识库">
-      <svg class="icon"><use href="#i-sync"></use></svg>同步
-    </button>`;
+function archiveState(doc: TreeDoc): { cls: 'none' | 'stale' | 'synced'; title: string; label: string } {
+  if (doc.stale) return { cls: 'stale', title: '草稿已改，分享版待更新', label: '待发布' };
+  if (doc.qdrant_sync === 'stale') return { cls: 'stale', title: '归档已更新，知识库仍是旧版', label: '待同步' };
+  if (doc.qdrant_sync === 'synced') return { cls: 'synced', title: '归档 Markdown 已写入知识库', label: '已同步' };
+  return { cls: 'none', title: '尚未写入知识库', label: '未同步' };
+}
+
+function moreBtn(): string {
+  return `<button class="tree-op tree-more" data-op="more" type="button" title="更多" aria-label="更多" aria-haspopup="menu">
+    <svg class="icon"><use href="#i-more"></use></svg>
+  </button>`;
+}
+
+interface MenuItem {
+  op: string;
+  label: string;
+  danger?: boolean;
+}
+
+let treeMenu: HTMLElement | null = null;
+
+function closeTreeMenu(): void {
+  treeMenu?.remove();
+  treeMenu = null;
+}
+
+function openTreeMenu(anchor: HTMLElement, items: MenuItem[], onPick: (op: string) => void): void {
+  closeTreeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'tree-menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = items
+    .map(
+      (it) =>
+        `<button type="button" role="menuitem" data-op="${it.op}" class="${it.danger ? 'danger' : ''}">${esc(it.label)}</button>`,
+    )
+    .join('');
+  document.body.appendChild(menu);
+  treeMenu = menu;
+  const r = anchor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(r.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8));
+  let top = r.bottom + 4;
+  if (top + menu.offsetHeight > window.innerHeight - 8) top = Math.max(8, r.top - menu.offsetHeight - 4);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-op]');
+    if (!btn?.dataset.op) return;
+    const op = btn.dataset.op;
+    closeTreeMenu();
+    onPick(op);
+  });
+  const onDoc = (e: MouseEvent): void => {
+    if (menu.contains(e.target as Node) || anchor.contains(e.target as Node)) return;
+    closeTreeMenu();
+    document.removeEventListener('mousedown', onDoc);
+  };
+  document.addEventListener('mousedown', onDoc);
 }
 
 function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIElement {
@@ -114,23 +160,23 @@ function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIE
   li.className = 'tree-doc' + (doc.doc_key === currentKey ? ' current' : '');
   li.dataset.docId = String(doc.id);
   if (doc.html_url) li.dataset.htmlUrl = doc.html_url;
-  const stale = mode === 'archive' && doc.stale
-    ? '<span class="tree-stale" title="草稿已改，尚未重新生成分享版">有未发布改动</span>'
-    : '';
-  const qdrant = qdrantBadge(mode, doc.qdrant_sync);
-  const ops =
-    mode === 'archive'
-      ? `<button class="tree-op" data-op="move" title="移动" aria-label="移动"><svg class="icon"><use href="#i-pencil"></use></svg></button>
-         <button class="tree-op" data-op="open-src" title="打开原稿" aria-label="打开原稿"><svg class="icon"><use href="#i-doc"></use></svg></button>
-         <button class="tree-op" data-op="copy" title="复制链接" aria-label="复制链接"><svg class="icon"><use href="#i-link"></use></svg></button>`
-      : `<button class="tree-op" data-op="rename" title="重命名" aria-label="重命名"><svg class="icon"><use href="#i-pencil"></use></svg></button>
-         <button class="tree-op" data-op="delete" title="删除" aria-label="删除"><svg class="icon"><use href="#i-trash"></use></svg></button>`;
+  let state = '';
+  let sync = '';
+  if (mode === 'archive') {
+    const st = archiveState(doc);
+    state = `<span class="tree-state tree-state-${st.cls}" title="${st.title}"><span class="tree-dot"></span><span class="tree-state-label">${st.label}</span></span>`;
+    if (st.cls !== 'synced') {
+      sync = `<button class="tree-op tree-qdrant-btn" data-op="qdrant-sync" type="button" title="同步到知识库" aria-label="同步到知识库">
+        <svg class="icon"><use href="#i-sync"></use></svg>
+      </button>`;
+    }
+  }
   li.innerHTML = `
     <span class="tree-label" title="${esc(mode === 'archive' ? doc.path : doc.doc_key)}">${esc(doc.title)}</span>
-    ${stale}
-    ${qdrant}
+    ${state}
     <span class="tree-ops">
-      ${ops}
+      ${sync}
+      ${moreBtn()}
     </span>`;
   return li;
 }
@@ -139,13 +185,7 @@ function renderFolder(folder: FolderNode, currentKey: string, mode: SidebarMode)
   const li = document.createElement('li');
   li.className = 'tree-folder open';
   li.dataset.folderPath = folder.path;
-  const folderOps =
-    mode === 'archive'
-      ? `<span class="tree-ops">
-           <button class="tree-op" data-op="folder-rename" title="重命名" aria-label="重命名文件夹"><svg class="icon"><use href="#i-pencil"></use></svg></button>
-           <button class="tree-op" data-op="folder-delete" title="删除" aria-label="删除文件夹"><svg class="icon"><use href="#i-trash"></use></svg></button>
-         </span>`
-      : '';
+  const folderOps = mode === 'archive' ? `<span class="tree-ops">${moreBtn()}</span>` : '';
   li.innerHTML = `
     <div class="tree-folder-row">
       <span class="tree-folder-label"><span class="tree-caret">▾</span>${esc(folder.name)}</span>
@@ -196,6 +236,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }));
 
   const paintTree = (docs: TreeDoc[], extraFolders: string[], emptyHtml: string, treeMode: SidebarMode): void => {
+    closeTreeMenu();
     const currentKey = opts.getCurrentKey();
     treeEl.innerHTML = '';
     if (docs.length === 0 && extraFolders.length === 0) {
@@ -404,8 +445,13 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   }
 
   const createDoc = async (): Promise<void> => {
-    const path = prompt('新文档路径（可含文件夹，如 notes/我的文档.md）', '新文档.md');
-    if (!path || !path.trim()) return;
+    const path = await askText({
+      title: '新建文档',
+      label: '路径（可含文件夹，如 notes/我的文档.md）',
+      value: '新文档.md',
+      confirmLabel: '创建',
+    });
+    if (path == null || !path.trim()) return;
     const docKey = path.trim();
     const filename = docKey.slice(docKey.lastIndexOf('/') + 1);
     const title = filename.replace(/\.md$/i, '');
@@ -420,7 +466,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       await refresh();
       opts.onOpen(r.id);
     } catch (e) {
-      alert('新建失败：' + (e as Error).message);
+      opts.onStatus?.('新建失败：' + (e as Error).message, true);
     }
   };
 
@@ -434,8 +480,13 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   }
 
   const createFolder = async (): Promise<void> => {
-    const path = prompt('新文件夹路径（如 项目/2026）', '未命名文件夹');
-    if (!path || !path.trim()) return;
+    const path = await askText({
+      title: '新建文件夹',
+      label: '路径（如 项目/2026）',
+      value: '未命名文件夹',
+      confirmLabel: '创建',
+    });
+    if (path == null || !path.trim()) return;
     try {
       const res = await fetch('/api/archive/folders', {
         method: 'POST',
@@ -445,7 +496,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (e) {
-      alert('新建文件夹失败：' + (e as Error).message);
+      opts.onStatus?.('新建文件夹失败：' + (e as Error).message, true);
     }
   };
 
@@ -454,48 +505,45 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     const target = e.target as HTMLElement;
     const opBtn = target.closest<HTMLElement>('.tree-op');
     if (opBtn) {
-      const op = opBtn.dataset.op;
-      if (op === 'folder-rename' || op === 'folder-delete') {
-        const folderPath = opBtn.closest<HTMLElement>('.tree-folder')?.dataset.folderPath;
-        if (!folderPath) return;
-        if (op === 'folder-rename') await renameFolder(folderPath);
-        else await deleteFolder(folderPath);
-        return;
-      }
+      const op = opBtn.dataset.op || '';
+      const folderEl = opBtn.closest<HTMLElement>('.tree-folder');
       const li = opBtn.closest<HTMLElement>('.tree-doc');
-      if (!li) return;
-      const id = Number(li.dataset.docId);
-      if (op === 'move') {
-        const entry = archiveEntries.find((d) => d.id === id);
-        if (entry) await moveArchive(entry);
-        return;
-      }
-      if (op === 'open-src') {
-        opts.onOpen(id);
-        return;
-      }
-      if (op === 'copy') {
-        const url = li.dataset.htmlUrl;
-        if (!url) {
-          opts.onStatus?.('没有可复制的链接', true);
+      if (op === 'more') {
+        if (folderEl && !li) {
+          const folderPath = folderEl.dataset.folderPath;
+          if (!folderPath) return;
+          openTreeMenu(opBtn, [
+            { op: 'folder-rename', label: '重命名' },
+            { op: 'folder-delete', label: '删除', danger: true },
+          ], (picked) => {
+            if (picked === 'folder-rename') void renameFolder(folderPath);
+            else void deleteFolder(folderPath);
+          });
           return;
         }
-        try {
-          await navigator.clipboard.writeText(url);
-          opts.onStatus?.('已复制链接');
-        } catch (err) {
-          opts.onStatus?.('复制失败：' + (err as Error).message, true);
+        if (!li) return;
+        const id = Number(li.dataset.docId);
+        if (mode === 'archive') {
+          openTreeMenu(opBtn, [
+            { op: 'move', label: '移动' },
+            { op: 'open-src', label: '打开原稿' },
+            { op: 'copy', label: '复制链接' },
+            { op: 'qdrant-sync', label: '同步到知识库' },
+          ], (picked) => void runDocOp(picked, li, id, opBtn));
+          return;
         }
+        const doc = allDocs.find((d) => d.id === id);
+        if (!doc) return;
+        openTreeMenu(opBtn, [
+          { op: 'rename', label: '重命名' },
+          { op: 'delete', label: '删除', danger: true },
+        ], (picked) => {
+          if (picked === 'rename') void renameDoc(doc);
+          else void deleteDoc(doc);
+        });
         return;
       }
-      if (op === 'qdrant-sync') {
-        await syncQdrant(id);
-        return;
-      }
-      const doc = allDocs.find((d) => d.id === id);
-      if (!doc) return;
-      if (op === 'rename') await renameDoc(doc);
-      else if (op === 'delete') await deleteDoc(doc);
+      if (li) await runDocOp(op, li, Number(li.dataset.docId), opBtn);
       return;
     }
     const folderLabel = target.closest<HTMLElement>('.tree-folder-label');
@@ -517,9 +565,48 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }
   });
 
+  const runDocOp = async (op: string, li: HTMLElement, id: number, btn?: HTMLElement): Promise<void> => {
+    if (op === 'move') {
+      const entry = archiveEntries.find((d) => d.id === id);
+      if (entry) await moveArchive(entry);
+      return;
+    }
+    if (op === 'open-src') {
+      opts.onOpen(id);
+      return;
+    }
+    if (op === 'copy') {
+      const url = li.dataset.htmlUrl;
+      if (!url) {
+        opts.onStatus?.('没有可复制的链接', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(url);
+        opts.onStatus?.('已复制链接');
+      } catch (err) {
+        opts.onStatus?.('复制失败：' + (err as Error).message, true);
+      }
+      return;
+    }
+    if (op === 'qdrant-sync') {
+      await syncQdrant(id, btn);
+      return;
+    }
+    const doc = allDocs.find((d) => d.id === id);
+    if (!doc) return;
+    if (op === 'rename') await renameDoc(doc);
+    else if (op === 'delete') await deleteDoc(doc);
+  };
+
   const renameDoc = async (doc: SidebarDoc): Promise<void> => {
-    const newKey = prompt('新路径（可含文件夹）', doc.doc_key);
-    if (!newKey || newKey.trim() === doc.doc_key) return;
+    const newKey = await askText({
+      title: '重命名文档',
+      label: '新路径（可含文件夹）',
+      value: doc.doc_key,
+      confirmLabel: '保存',
+    });
+    if (newKey == null || !newKey.trim() || newKey.trim() === doc.doc_key) return;
     try {
       const res = await fetch(`/api/docs/${doc.id}/rename`, {
         method: 'POST',
@@ -531,25 +618,35 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       opts.onRenamed(doc.doc_key, newKey.trim());
       await refresh();
     } catch (err) {
-      alert('重命名失败：' + (err as Error).message);
+      opts.onStatus?.('重命名失败：' + (err as Error).message, true);
     }
   };
 
   const deleteDoc = async (doc: SidebarDoc): Promise<void> => {
-    if (!confirm(`删除「${doc.title}」？\n仅删除工作区记录，不影响磁盘原文件与图床。`)) return;
+    const ok = await askConfirm(`删除「${doc.title}」？\n仅删除工作区记录，不影响磁盘原文件与图床。`, {
+      title: '删除文档',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/docs/${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       await removeHandle(doc.doc_key);
       await refresh();
     } catch (err) {
-      alert('删除失败：' + (err as Error).message);
+      opts.onStatus?.('删除失败：' + (err as Error).message, true);
     }
   };
 
   const moveArchive = async (entry: ArchiveEntry): Promise<void> => {
-    const next = prompt('新的归档路径', entry.archive_path);
-    if (!next || next.trim() === entry.archive_path) return;
+    const next = await askText({
+      title: '移动归档',
+      label: '新的归档路径',
+      value: entry.archive_path,
+      confirmLabel: '移动',
+    });
+    if (next == null || !next.trim() || next.trim() === entry.archive_path) return;
     try {
       const res = await fetch(`/api/docs/${entry.id}/archive-path`, {
         method: 'POST',
@@ -559,11 +656,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('移动失败：' + (err as Error).message);
+      opts.onStatus?.('移动失败：' + (err as Error).message, true);
     }
   };
 
-  const syncQdrant = async (id: number): Promise<void> => {
+  const syncQdrant = async (id: number, btn?: HTMLElement): Promise<void> => {
+    if (btn instanceof HTMLButtonElement) btn.disabled = true;
     opts.onStatus?.('正在同步到知识库…');
     try {
       const res = await fetch(`/api/docs/${id}/qdrant-sync`, { method: 'POST' });
@@ -573,12 +671,19 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       await refresh();
     } catch (err) {
       opts.onStatus?.('同步失败：' + (err as Error).message, true);
+    } finally {
+      if (btn instanceof HTMLButtonElement) btn.disabled = false;
     }
   };
 
   const renameFolder = async (from: string): Promise<void> => {
-    const to = prompt('新的文件夹路径', from);
-    if (!to || to.trim() === from) return;
+    const to = await askText({
+      title: '重命名文件夹',
+      label: '新的文件夹路径',
+      value: from,
+      confirmLabel: '保存',
+    });
+    if (to == null || !to.trim() || to.trim() === from) return;
     try {
       const res = await fetch('/api/archive/folders/rename', {
         method: 'POST',
@@ -588,18 +693,23 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('重命名失败：' + (err as Error).message);
+      opts.onStatus?.('重命名失败：' + (err as Error).message, true);
     }
   };
 
   const deleteFolder = async (path: string): Promise<void> => {
-    if (!confirm(`删除文件夹「${path}」？\n仅当其中没有归档文档时可以删除。`)) return;
+    const ok = await askConfirm(`删除文件夹「${path}」？\n仅当其中没有归档文档时可以删除。`, {
+      title: '删除文件夹',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch('/api/archive/folders?path=' + encodeURIComponent(path), { method: 'DELETE' });
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('删除失败：' + (err as Error).message);
+      opts.onStatus?.('删除失败：' + (err as Error).message, true);
     }
   };
 

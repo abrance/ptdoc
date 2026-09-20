@@ -1,5 +1,7 @@
 // ─── 媒体库面板（抽屉：缩略图网格 / 复制 / 插入 / 删除）────────
 
+import { askConfirm } from './dialog';
+
 interface MediaRow {
   id: number;
   qiniu_key: string;
@@ -13,6 +15,7 @@ interface MediaRow {
 interface MediaPanelOptions {
   onInsert: (url: string, filename: string) => void;
   onStatus: (msg: string, isError?: boolean) => void;
+  onUpload?: () => void;
 }
 
 function esc(s: string): string {
@@ -47,11 +50,15 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
           <option value="direct">直接上传</option>
           <option value="mermaid">mermaid 图</option>
         </select>
-        <button id="media-close" type="button">✕</button>
+        <button id="media-upload" type="button">上传</button>
+        <button id="media-close" class="icon-btn" type="button" aria-label="关闭">
+          <svg class="icon"><use href="#i-close"></use></svg>
+        </button>
       </div>
       <div id="media-grid" class="media-grid"></div>`;
     document.body.appendChild(drawer);
     $('media-close').addEventListener('click', () => drawer!.classList.remove('open'));
+    $('media-upload').addEventListener('click', () => opts.onUpload?.());
     const search = $('media-search') as HTMLInputElement;
     const source = $('media-source') as HTMLSelectElement;
     search.addEventListener('input', () => void refresh());
@@ -144,7 +151,12 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
     const rows = (await res.json()) as MediaRow[];
     const m = rows.find((r) => r.id === id);
     if (!m) return;
-    if (!confirm(`删除「${m.filename}」？\n将同时删除七牛桶内文件。已生成的分享版/站点图片会失效，需重新生成。`)) return;
+    const ok = await askConfirm(`删除「${m.filename}」？\n将同时删除七牛桶内文件。已生成的分享版/站点图片会失效，需重新生成。`, {
+      title: '删除媒体',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const r = await fetch(`/api/media/${id}`, { method: 'DELETE' });
       if (!r.ok) {
