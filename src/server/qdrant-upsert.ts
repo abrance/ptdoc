@@ -107,8 +107,53 @@ export function toQdrantUpsertPoints(
   });
 }
 
+/**
+ * ptdoc 自建网关（ptdoc-qdrant-gateway）契约：点里放顶层 `document` 字符串，
+ * 由网关用本地模型向量化后再写入 Qdrant；命名向量走顶层 `using`。
+ */
+export function toGatewayUpsertPoints(
+  points: TextPoint[],
+): Array<{ id: string; document: string; payload: Record<string, unknown> }> {
+  return points.map((p) => ({ id: p.id, document: p.text, payload: p.payload }));
+}
+
+/** 旧版网关兼容：顶层 `text`。 */
+export function toTextUpsertPoints(
+  points: TextPoint[],
+): Array<{ id: string; text: string; payload: Record<string, unknown> }> {
+  return points.map((p) => ({ id: p.id, text: p.text, payload: p.payload }));
+}
+
+export interface UpsertAttempt {
+  kind: 'inference' | 'document' | 'text';
+  body: Record<string, unknown>;
+}
+
+/**
+ * 写入格式按部署形态依次尝试：
+ * 1. `inference`：Qdrant Cloud 服务端向量化的 Document `{ text }`；
+ * 2. `document`：ptdoc 网关（本地 FastEmbed）契约；
+ * 3. `text`：旧版网关兼容格式。
+ */
+export function upsertAttempts(points: TextPoint[], vectorName?: string): UpsertAttempt[] {
+  const name = vectorName?.trim();
+  const gateway: Record<string, unknown> = { points: toGatewayUpsertPoints(points) };
+  if (name) gateway.using = name;
+  return [
+    { kind: 'inference', body: { points: toQdrantUpsertPoints(points, vectorName) } },
+    { kind: 'document', body: gateway },
+    { kind: 'text', body: { points: toTextUpsertPoints(points) } },
+  ];
+}
+
 function isJsonFormatError(text: string): boolean {
   return /unknown field|deserialize|json body|format error|expected one of/i.test(text);
+}
+
+/** 截断上游错误正文，便于在前端直接看到失败原因。 */
+function shortError(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 200 ? flat.slice(0, 200) + '…' : flat;
 }
 
 function isInferenceDisabledError(text: string): boolean {
@@ -168,20 +213,24 @@ async function defaultUpsert(opts: {
   if (opts.points.length === 0) return;
 
   const putPath = `/collections/${col}/points?wait=true`;
-  const inference = await qdrantJson(opts.url, opts.apiKey, 'PUT', putPath, {
-    points: toQdrantUpsertPoints(opts.points, opts.vectorName),
-  });
-  if (inference.ok) return;
+  const failures: Array<{ kind: UpsertAttempt['kind']; status: number; text: string }> = [];
+  for (const attempt of upsertAttempts(opts.points, opts.vectorName)) {
+    const res = await qdrantJson(opts.url, opts.apiKey, 'PUT', putPath, attempt.body);
+    if (res.ok) return;
+    failures.push({ kind: attempt.kind, status: res.status, text: res.text });
+  }
 
-  const gateway = await qdrantJson(opts.url, opts.apiKey, 'PUT', putPath, {
-    points: opts.points.map((p) => ({ id: p.id, text: p.text, payload: p.payload })),
-  });
-  if (gateway.ok) return;
+  console.warn(
+    '[qdrant] upsert failed',
+    failures.map((f) => `${f.kind} ${f.status} ${shortError(f.text)}`).join(' | '),
+  );
 
-  if (isInferenceDisabledError(inference.text) || isInferenceDisabledError(gateway.text)) {
+  if (failures.some((f) => isInferenceDisabledError(f.text))) {
     throw new HttpError(400, TEXT_NOT_ENABLED);
   }
-  throw new HttpError(400, '知识库写入失败');
+  const last = failures[failures.length - 1];
+  const detail = last && last.text.trim() ? `：${shortError(last.text)}` : '';
+  throw new HttpError(400, `知识库写入失败${detail}`);
 }
 
 export async function upsertArchiveMarkdown(opts: UpsertArchiveOpts): Promise<{ chunks: number }> {

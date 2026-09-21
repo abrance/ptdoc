@@ -23,6 +23,7 @@ import {
   setQdrantUpsertForTests,
   toQdrantUpsertPoints,
   upsertArchiveMarkdown,
+  upsertAttempts,
 } from './qdrant-upsert.ts';
 import { syncArchiveToQdrant } from './archive-qdrant.ts';
 
@@ -119,6 +120,20 @@ test('toQdrantUpsertPoints 有 vector 名时用 named Document', () => {
   assert.deepEqual(pts[0].vector, { dense: { text: 'hello' } });
 });
 
+test('upsertAttempts 依次给出 inference / document / text 三种格式', () => {
+  const points = [{ id: '1', text: 'hello', payload: { a: 1 } }];
+  const attempts = upsertAttempts(points);
+  assert.deepEqual(
+    attempts.map((a) => a.kind),
+    ['inference', 'document', 'text'],
+  );
+  const gateway = attempts[1].body.points as Array<Record<string, unknown>>;
+  assert.equal(gateway[0].document, 'hello');
+  assert.equal(gateway[0].text, undefined);
+  assert.equal(attempts[1].body.using, undefined);
+  assert.equal(upsertAttempts(points, 'dense')[1].body.using, 'dense');
+});
+
 const SAMPLE_UPSERT = {
   url: 'http://qdrant.example',
   collection: 'col',
@@ -182,14 +197,19 @@ test('defaultUpsert 带 vectorName 时写入 named Document', async () => {
   assert.deepEqual(points.vector, { dense: { text: 'hello' } });
 });
 
-test('inference 格式被拒后回退 gateway 的 text 字段', async () => {
+test('inference 格式被拒后回退网关的 document 字段', async () => {
   setQdrantUpsertForTests(null);
   let puts = 0;
   const calls = await withMockFetch(
     (_url, method) => {
       if (method === 'PUT') {
         puts += 1;
-        if (puts === 1) return { status: 400, body: '{"status":{"error":"unknown field `vector`"}}' };
+        if (puts === 1) {
+          return {
+            status: 422,
+            body: 'Failed to deserialize the JSON body into the target type: points[0]: missing field `document`',
+          };
+        }
         return { status: 200, body: '{"status":"ok"}' };
       }
       return { status: 200, body: '{"status":"ok"}' };
@@ -200,10 +220,31 @@ test('inference 格式被拒后回退 gateway 的 text 字段', async () => {
   );
   const putsCalls = calls.filter((c) => c.method === 'PUT');
   assert.equal(putsCalls.length, 2);
-  assert.equal((putsCalls[1].body.points as Array<Record<string, unknown>>)[0].text, 'hello');
+  const point = (putsCalls[1].body.points as Array<Record<string, unknown>>)[0];
+  assert.equal(point.document, 'hello');
+  assert.equal(point.text, undefined);
+  assert.equal(point.vector, undefined);
 });
 
-test('unknown field 不再误报未启用服务端向量化', async () => {
+test('document 也被拒后回退旧网关的 text 字段', async () => {
+  setQdrantUpsertForTests(null);
+  const calls = await withMockFetch(
+    (_url, method, body) => {
+      if (method !== 'PUT') return { status: 200, body: '{}' };
+      const point = (body.points as Array<Record<string, unknown>>)[0];
+      if (point.text !== undefined) return { status: 200, body: '{"status":"ok"}' };
+      return { status: 400, body: '{"status":{"error":"unknown field `document`"}}' };
+    },
+    async () => {
+      await upsertArchiveMarkdown(SAMPLE_UPSERT);
+    },
+  );
+  const putsCalls = calls.filter((c) => c.method === 'PUT');
+  assert.equal(putsCalls.length, 3);
+  assert.equal((putsCalls[2].body.points as Array<Record<string, unknown>>)[0].text, 'hello');
+});
+
+test('三种格式都失败时报错带上游原因', async () => {
   setQdrantUpsertForTests(null);
   await assert.rejects(
     () =>
@@ -213,7 +254,10 @@ test('unknown field 不再误报未启用服务端向量化', async () => {
           await upsertArchiveMarkdown(SAMPLE_UPSERT);
         },
       ),
-    (err: unknown) => err instanceof HttpError && err.message === '知识库写入失败',
+    (err: unknown) =>
+      err instanceof HttpError &&
+      err.message.startsWith('知识库写入失败：') &&
+      err.message.includes('unknown field `text`'),
   );
 });
 
