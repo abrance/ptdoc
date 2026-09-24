@@ -181,6 +181,13 @@ function migrateToMultiUser(): void {
     | undefined;
   if (flag?.value === '1') return;
 
+  // node:sqlite 默认开启外键约束（enableForeignKeyConstraints: true，不像 sqlite3 CLI，
+  // 这个库没有地方显式 PRAGMA 过），而下面的多用户迁移要整表重建 docs / shares 这类父表：
+  // 子行存在时 DROP TABLE 会直接抛 `FOREIGN KEY constraint failed`（images.share_id →
+  // shares.id、doc_versions.doc_id → docs.id），整个服务起不来。
+  // 按 SQLite 官方的改表流程：先关外键再进事务；两个 PRAGMA 都必须在事务之外执行。
+  // 重建时保留原 id，所以关掉校验不会让子表引用错位。
+  d.exec('PRAGMA foreign_keys = OFF');
   d.exec('BEGIN');
   try {
     recreateDocsTable();
@@ -192,6 +199,8 @@ function migrateToMultiUser(): void {
   } catch (e) {
     d.exec('ROLLBACK');
     throw e;
+  } finally {
+    d.exec('PRAGMA foreign_keys = ON');
   }
 }
 

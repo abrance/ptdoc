@@ -86,6 +86,88 @@ test('旧库迁移后含 user_id 且 users 仍为空', () => {
   closeDB();
 });
 
+test('旧库的 images / doc_versions 有子行时也能重建父表', () => {
+  // 回归：node:sqlite 默认 enableForeignKeyConstraints 为 true，而多用户迁移要
+  // 整表重建 docs / shares 这两个「父表」。子表有引用行时 DROP TABLE 会直接报
+  // `FOREIGN KEY constraint failed`，整个 dev server 起不来（2026-09-24 本机 data/ptdoc.db 实测）。
+  const file = tmpDb();
+  const raw = new DatabaseSync(file);
+  raw.exec(`
+    CREATE TABLE docs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_key TEXT UNIQUE NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      filename TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_opened_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE shares (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_key TEXT,
+      share_md TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      html_url TEXT,
+      md_url TEXT
+    );
+    CREATE TABLE images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      share_id INTEGER NOT NULL,
+      qiniu_key TEXT NOT NULL,
+      url TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (share_id) REFERENCES shares(id)
+    );
+    CREATE TABLE doc_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id INTEGER NOT NULL REFERENCES docs(id),
+      content TEXT NOT NULL,
+      label TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE media (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      qiniu_key TEXT NOT NULL,
+      url TEXT NOT NULL,
+      filename TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'direct',
+      size INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE mermaid_cache (
+      mermaid_hash TEXT PRIMARY KEY,
+      qiniu_key TEXT NOT NULL,
+      url TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  raw.prepare(
+    'INSERT INTO docs (doc_key, title, filename, content, created_at, updated_at, last_opened_at) VALUES (?,?,?,?,?,?,?)',
+  ).run('notes/a.md', 'A', 'a.md', '# A', 1, 1, 1);
+  raw.prepare('INSERT INTO shares (doc_key, share_md, created_at) VALUES (?,?,?)').run('notes/a.md', '# 分享版', 1);
+  raw.prepare('INSERT INTO images (share_id, qiniu_key, url, created_at) VALUES (?,?,?,?)').run(1, 'k/1.png', 'https://cdn/1.png', 1);
+  raw.prepare('INSERT INTO doc_versions (doc_id, content, created_at) VALUES (?,?,?)').run(1, '# 快照', 1);
+  raw.close();
+
+  initDB(file);
+  assert.equal(isMultiUserMigrated(), true);
+  assert.equal(docsHasUserId(), true);
+  closeDB();
+
+  // 重建父表保留原 id，子表引用不能错位
+  const check = new DatabaseSync(file);
+  const count = (sql: string) => (check.prepare(sql).get() as { c: number }).c;
+  assert.equal(count('SELECT COUNT(*) c FROM docs'), 1);
+  assert.ok(check.prepare('SELECT id FROM docs WHERE doc_key=?').get('notes/a.md'));
+  assert.equal(count('SELECT COUNT(*) c FROM shares'), 1);
+  assert.equal(count('SELECT COUNT(*) c FROM images'), 1);
+  assert.equal(count('SELECT COUNT(*) c FROM doc_versions'), 1);
+  assert.equal(count('SELECT COUNT(*) c FROM images i JOIN shares s ON s.id = i.share_id'), 1);
+  assert.equal(count('SELECT COUNT(*) c FROM doc_versions v JOIN docs d ON d.id = v.doc_id'), 1);
+  check.close();
+});
+
 test('同名 doc_key 分用户隔离；跨用户读取不存在', () => {
   initDB(tmpDb());
   const a = createUser('alice', 'hash', 'member');
