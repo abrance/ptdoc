@@ -12,6 +12,8 @@ import { startGate, logout, type SessionUser } from './gate';
 import { initSettingsPanel } from './settings';
 import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
+import { initOverlayManager, closeTopOverlay } from './overlay';
+import { initScrollSync } from './scroll-sync';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -73,6 +75,19 @@ function setStatus(msg: string, isError = false): void {
   statusEl.className = 'status' + (isError ? ' error' : '');
 }
 
+// ─── 保存状态（状态栏右侧，和瞬时提示分开）────────────────
+function setSaveState(state: 'idle' | 'dirty' | 'saving' | 'saved' | 'error'): void {
+  const el = $('save-state');
+  const at = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  el.className = 'save-state' + (state === 'error' ? ' error' : '');
+  el.textContent =
+    state === 'dirty' ? '未保存'
+    : state === 'saving' ? '保存中…'
+    : state === 'saved' ? '已保存 ' + at
+    : state === 'error' ? '未保存（离线）'
+    : '';
+}
+
 /** 更新顶栏的当前文档内容来源标记（标签 + 悬停原因）。 */
 function setDocSource(kind: DocSourceKind, label: string, reason: string): void {
   currentDocSource = { kind, label, reason };
@@ -97,8 +112,71 @@ function syncChrome(): void {
 type WorkspaceView = 'edit' | 'split' | 'preview';
 let workspaceView: WorkspaceView = 'split';
 
+// ─── 布局偏好持久化（视图 / 侧栏 / 分栏比例 / 目录 / 主题）──
+// 刷新后布局保持原样，不用每次重新摆一遍。
+const PREF_KEY = 'ptdoc.prefs';
+const SPLIT_MIN = 0.28;
+const SPLIT_MAX = 0.72;
+
+interface Prefs {
+  view?: WorkspaceView;
+  sidebar?: boolean;
+  split?: number;
+  toc?: boolean;
+  theme?: ThemeMode;
+}
+
+function readPrefs(): Prefs {
+  try {
+    return JSON.parse(localStorage.getItem(PREF_KEY) ?? '{}') as Prefs;
+  } catch {
+    return {};
+  }
+}
+
+function writePref<K extends keyof Prefs>(key: K, value: Prefs[K]): void {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPrefs(), [key]: value }));
+  } catch {
+    /* 隐私模式禁用 localStorage：忽略，不影响功能 */
+  }
+}
+
+function setSplitRatio(main: HTMLElement, left: number): void {
+  const l = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, left));
+  main.style.gridTemplateColumns = l + 'fr 6px ' + (1 - l) + 'fr';
+}
+
+// 主题默认跟随系统；index.html 里有一段同样的预置脚本，避免首帧闪白。
+const themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+const THEME_ORDER = ['auto', 'light', 'dark'] as const;
+type ThemeMode = (typeof THEME_ORDER)[number];
+
+function applyTheme(): void {
+  const mode = readPrefs().theme ?? 'auto';
+  const dark = mode === 'dark' || (mode === 'auto' && themeMedia.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const btn = $('theme-toggle');
+  const label = mode === 'auto' ? '跟随系统' : mode === 'light' ? '浅色' : '深色';
+  btn.title = '外观：' + label + '（点击切换）';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function initTheme(): void {
+  applyTheme();
+  themeMedia.addEventListener('change', () => {
+    if ((readPrefs().theme ?? 'auto') === 'auto') applyTheme();
+  });
+  $('theme-toggle').addEventListener('click', () => {
+    const cur = readPrefs().theme ?? 'auto';
+    writePref('theme', THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length]);
+    applyTheme();
+  });
+}
+
 function setWorkspaceView(view: WorkspaceView): void {
   workspaceView = view;
+  writePref('view', view);
   document.body.classList.toggle('view-edit', view === 'edit');
   document.body.classList.toggle('view-preview', view === 'preview');
   document.body.classList.toggle('view-split', view === 'split');
@@ -132,11 +210,18 @@ function setSidebarOpen(open: boolean): void {
   backdrop.hidden = true;
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
   btn.title = open ? '折叠侧边栏' : '展开侧边栏';
+  writePref('sidebar', open);
 }
 
 function initLayoutChrome(): void {
-  setWorkspaceView(isMobileLayout() ? 'edit' : 'split');
-  setSidebarOpen(!isMobileLayout());
+  const prefs = readPrefs();
+  setWorkspaceView(isMobileLayout() ? 'edit' : prefs.view ?? 'split');
+  setSidebarOpen(prefs.sidebar ?? !isMobileLayout());
+  const mainEl = document.querySelector('.workspace-main') as HTMLElement | null;
+  if (mainEl && workspaceView === 'split' && !isMobileLayout() && prefs.split) {
+    setSplitRatio(mainEl, prefs.split);
+  }
+  if (prefs.toc) toggleToc(true);
   $('view-edit').addEventListener('click', () => setWorkspaceView('edit'));
   $('view-split').addEventListener('click', () => setWorkspaceView('split'));
   $('view-preview').addEventListener('click', () => setWorkspaceView('preview'));
@@ -154,12 +239,13 @@ function initLayoutChrome(): void {
     e.preventDefault();
     const start = main.getBoundingClientRect();
     document.body.classList.add('resizing');
+    let left = 0.5;
     const move = (ev: PointerEvent) => {
-      const ratio = (ev.clientX - start.left) / start.width;
-      const left = Math.min(0.72, Math.max(0.28, ratio));
-      main.style.gridTemplateColumns = left + 'fr 6px ' + (1 - left) + 'fr';
+      left = (ev.clientX - start.left) / start.width;
+      setSplitRatio(main, left);
     };
     const up = () => {
+      writePref('split', Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, left)));
       document.body.classList.remove('resizing');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -198,6 +284,7 @@ function ensureTocPanel(): HTMLElement {
 
 function toggleToc(force?: boolean): void {
   tocOpen = force ?? !tocOpen;
+  writePref('toc', tocOpen);
   const panel = ensureTocPanel();
   panel.classList.toggle('open', tocOpen);
   document.body.classList.toggle('toc-on', tocOpen);
@@ -217,7 +304,10 @@ function deriveTitle(md: string, filename: string): string {
   const m = md.match(/^#\s+(.+)$/m);
   return (m ? m[1].trim() : filename || '未命名文档').slice(0, 120);
 }
+let saveSeq = 0;
 async function saveCurrentDoc(): Promise<void> {
+  const seq = ++saveSeq;
+  setSaveState('saving');
   try {
     const res = await fetch('/api/docs', {
       method: 'POST',
@@ -231,8 +321,10 @@ async function saveCurrentDoc(): Promise<void> {
     });
     const r = (await res.json()) as { id: number };
     currentDocId = r.id;
+    if (seq === saveSeq) setSaveState('saved');
   } catch {
-    /* 离线时静默忽略 */
+    /* 离线时静默忽略，但状态栏要如实显示 */
+    if (seq === saveSeq) setSaveState('error');
   }
 }
 function scheduleSave(): void {
@@ -1321,8 +1413,13 @@ async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
 // ─── 启动（登录后才加载工作区）──────────────────────────
 $('toc-toggle').addEventListener('click', () => toggleToc());
 initLayoutChrome();
+initTheme();
+initOverlayManager();
+// 分栏下编辑区与预览区双向联动；单栏时另一侧不可见，直接不同步。
+initScrollSync(editor, preview, { isActive: () => workspaceView === 'split' && !isMobileLayout() });
 
 editor.addEventListener('input', () => {
+  setSaveState('dirty');
   scheduleRender();
   scheduleSave();
   schedulePublishCheck();
@@ -1339,6 +1436,16 @@ document.addEventListener('keydown', (e) => {
       ? !document.body.classList.contains('sidebar-open')
       : document.body.classList.contains('sidebar-collapsed');
     setSidebarOpen(open);
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    clearTimeout(saveTimer);
+    void saveCurrentDoc();
+  }
+  if (e.key === 'Escape') {
+    // 先关浮层；没有浮层时在窄屏收起文档树抽屉，不抢 Esc 的其它用途。
+    if (closeTopOverlay()) return;
+    if (isMobileLayout() && document.body.classList.contains('sidebar-open')) setSidebarOpen(false);
   }
 });
 
