@@ -52,21 +52,36 @@ function injectHeadingIds(html: string): string {
 }
 
 /** 渲染文档正文：mermaid 内联 SVG + 站内互链改写 + 标题锚点。 */
-function renderBody(md: string): string {
+async function renderBody(md: string): Promise<string> {
   let html = renderMarkdown(md);
-  html = html.replace(/<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g, (_m, escaped: string) => {
-    const code = decodeHtmlEntities(escaped);
-    try {
-      return `<div class="mermaid-render">${renderMermaidToSvg(code)}</div>`;
-    } catch (e) {
-      return `<div class="mermaid-error">Mermaid 渲染失败：${(e as Error).message}</div>`;
-    }
-  });
+  html = await replaceMermaidBlocks(html);
   html = html.replace(/href="([^"]*\.md)(#[^"]*)?"/gi, (m, path: string, anchor: string) => {
     if (/^(https?:|mailto:|#)/i.test(path)) return m;
     return `href="${path.replace(/\.md$/i, '.html')}${anchor ?? ''}"`;
   });
   return injectHeadingIds(html);
+}
+
+/**
+ * 把 ```mermaid 代码块换成内联 SVG。引擎（beautiful-mermaid）现在是动态 import 的，
+ * 所以不能用 String.replace 的同步回调，改成逐个匹配 await 后拼接。
+ */
+async function replaceMermaidBlocks(html: string): Promise<string> {
+  const re = /<pre><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g;
+  const out: string[] = [];
+  let last = 0;
+  for (const m of html.matchAll(re)) {
+    out.push(html.slice(last, m.index));
+    const code = decodeHtmlEntities(m[1]);
+    try {
+      out.push(`<div class="mermaid-render">${await renderMermaidToSvg(code)}</div>`);
+    } catch (e) {
+      out.push(`<div class="mermaid-error">Mermaid 渲染失败：${(e as Error).message}</div>`);
+    }
+    last = m.index + m[0].length;
+  }
+  out.push(html.slice(last));
+  return out.join('');
 }
 
 // ─── 导航树（doc_key 路径分层，当前页高亮）──────────────────
@@ -112,9 +127,9 @@ function navNodesHtml(nodes: NavNode[], prefix: string, currentPath: string): st
 }
 
 // ─── 页面模板 ─────────────────────────────────────────────
-function renderPage(docs: SiteDoc[], doc: SiteDoc | null, homeContent: string, prefix: string, currentPath: string): string {
+async function renderPage(docs: SiteDoc[], doc: SiteDoc | null, homeContent: string, prefix: string, currentPath: string): Promise<string> {
   const title = doc ? `${doc.title} · ${SITE_TITLE}` : SITE_TITLE;
-  const content = doc ? renderBody(doc.content) : renderBody(homeContent);
+  const content = doc ? await renderBody(doc.content) : await renderBody(homeContent);
   const nav = navNodesHtml(buildNavNodes(docs), prefix, currentPath);
   return `<!doctype html>
 <html lang="zh-CN">
@@ -257,7 +272,7 @@ function parseUserFlag(): number {
 }
 
 // ─── 主流程 ─────────────────────────────────────────────
-function main(): void {
+async function main(): Promise<void> {
   initDB();
   const userId = parseUserFlag();
   const all = listAllDocs(userId)
@@ -294,13 +309,13 @@ function main(): void {
     const prefix = pagePrefix(d.htmlPath);
     const outPath = join(OUT, d.htmlPath);
     mkdirSync(dirname(outPath), { recursive: true });
-    writeFileSync(outPath, renderPage(docs, d, homeContent, prefix, d.htmlPath), 'utf8');
+    writeFileSync(outPath, await renderPage(docs, d, homeContent, prefix, d.htmlPath), 'utf8');
   }
 
   // 首页（当前页标记为 index.html，导航里 index.md 高亮）
   writeFileSync(
     join(OUT, 'index.html'),
-    renderPage(docs, null, homeContent, '', 'index.html'),
+    await renderPage(docs, null, homeContent, '', 'index.html'),
     'utf8',
   );
 
@@ -323,4 +338,7 @@ function main(): void {
   console.log(`已生成静态站点：${docs.length} 篇文档 → ${OUT}`);
 }
 
-main();
+main().catch((e: unknown) => {
+  console.error(e);
+  process.exitCode = 1;
+});

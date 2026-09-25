@@ -1,4 +1,17 @@
-import { renderMermaidSVG, type RenderOptions } from 'beautiful-mermaid';
+import type { RenderOptions } from 'beautiful-mermaid';
+
+// ─── 引擎懒加载 ─────────────────────────────────────────
+// beautiful-mermaid 单独 min+gzip 约 490KB，占首屏 JS 的 95%；而大多数文档根本没画图。
+// 所以这里改成动态 import：真正出现 ```mermaid 代码块时才拉那一份 chunk。
+// 构建脚本（scripts/build-site.ts）走的是同一份代码，动态 import 在 Node 下同样可用。
+type MermaidEngine = typeof import('beautiful-mermaid');
+
+let enginePromise: Promise<MermaidEngine> | null = null;
+
+function loadEngine(): Promise<MermaidEngine> {
+  enginePromise ??= import('beautiful-mermaid');
+  return enginePromise;
+}
 
 // ─── 你的业务逻辑：统一的图表配色主题 ────────────────────────────
 // 改这里即可让全站 Mermaid 图保持一致风格（浅色、便于阅读与截图）。
@@ -89,10 +102,21 @@ function applySvgStyleOverrides(svg: string): string {
   return svg.replace('</svg>', `<style>${css}\n</style>\n</svg>`);
 }
 
-/** 把一段 Mermaid 源码渲染为 SVG 字符串（同步，浏览器/Node 通用）。 */
-export function renderMermaidToSvg(code: string): string {
-  return applySvgStyleOverrides(renderMermaidSVG(code.trim(), DIAGRAM_THEME));
+/** 把一段 Mermaid 源码渲染为 SVG 字符串（异步，首次会加载引擎 chunk）。 */
+export async function renderMermaidToSvg(code: string): Promise<string> {
+  // 同一个源码只渲染一次：预览每次输入（200ms 防抖）都会重跑 renderMermaidBlocks，
+  // 实测单张图 4~8ms，十几张图时每次按键都会白烧几十毫秒。
+  const key = hashMermaid(code) + ':' + code.length;
+  const cached = svgCache.get(key);
+  if (cached !== undefined) return cached;
+  const { renderMermaidSVG } = await loadEngine();
+  const svg = applySvgStyleOverrides(renderMermaidSVG(code.trim(), DIAGRAM_THEME));
+  svgCache.set(key, svg);
+  return svg;
 }
+
+/** 源码 -> SVG 的进程内缓存（djb2 + 长度做键，避免哈希碰撞串图）。 */
+const svgCache = new Map<string, string>();
 
 /**
  * 把一段 Mermaid 源码渲染为 SVG 字符串（同步，浏览器/Node 通用）。
@@ -116,8 +140,8 @@ function inlineCssVars(svg: string): string {
  * 把 Mermaid 源码渲染成 PNG Blob（用于「分享版」时上传到图床）。
  * 流程：renderMermaidSVG -> SVG 字符串 -> Image -> Canvas -> PNG。
  */
-export function renderMermaidToPngBlob(code: string, scale = 2): Promise<Blob> {
-  const svg = inlineCssVars(renderMermaidToSvg(code.trim()));
+export async function renderMermaidToPngBlob(code: string, scale = 2): Promise<Blob> {
+  const svg = inlineCssVars(await renderMermaidToSvg(code.trim()));
   return new Promise((resolve, reject) => {
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -176,23 +200,26 @@ export async function sha256Mermaid(code: string): Promise<string> {
  * 在给定容器内，把所有 ```mermaid 代码块替换为渲染后的 SVG。
  * 这是「胶水」：让 Markdown 渲染结果中的图表自动可视化。
  */
-export function renderMermaidBlocks(container: HTMLElement): void {
-  const blocks = container.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
-  blocks.forEach((codeEl) => {
+export async function renderMermaidBlocks(container: HTMLElement): Promise<void> {
+  const blocks = [...container.querySelectorAll<HTMLElement>('pre > code.language-mermaid')];
+  for (const codeEl of blocks) {
     const pre = codeEl.parentElement;
-    if (!pre) return;
+    if (!pre) continue;
     const source = codeEl.textContent ?? '';
     try {
-      const svg = renderMermaidToSvg(source);
+      const svg = await renderMermaidToSvg(source);
+      // 等引擎期间可能又重渲染过一次，旧的 pre 已被换掉，别往死节点上写
+      if (!pre.isConnected) continue;
       const wrap = document.createElement('div');
       wrap.className = 'mermaid-render';
       wrap.innerHTML = svg;
       pre.replaceWith(wrap);
     } catch (err) {
+      if (!pre.isConnected) continue;
       const note = document.createElement('div');
       note.className = 'mermaid-error';
       note.textContent = 'Mermaid 渲染失败：' + (err as Error).message;
       pre.replaceWith(note);
     }
-  });
+  }
 }
