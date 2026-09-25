@@ -14,6 +14,8 @@ import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
 import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
+import { askConfirm, askText } from './dialog';
+import { showToast } from './toast';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -73,6 +75,8 @@ function scheduleRender(): void {
 function setStatus(msg: string, isError = false): void {
   statusEl.textContent = msg;
   statusEl.className = 'status' + (isError ? ' error' : '');
+  // 错误另外弹一个会自己消失的提示：状态栏那行会被下一次操作覆盖，容易直接错过
+  if (isError && msg) showToast(msg, 'error');
 }
 
 // ─── 保存状态（状态栏右侧，和瞬时提示分开）────────────────
@@ -1232,7 +1236,12 @@ function viewShareMd(id: number): void {
 }
 
 async function deleteShareRecord(id: number): Promise<void> {
-  if (!confirm('删除这条分享记录？\n仅删除本地记录，七牛上已发布的 HTML 仍可访问。')) return;
+  const ok = await askConfirm('仅删除本地记录，七牛上已发布的 HTML 仍可访问。', {
+    title: '删除这条分享记录？',
+    confirmLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const res = await fetch(`/api/share/${id}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1329,15 +1338,17 @@ async function saveSnapshot(): Promise<void> {
     setStatus('请先保存或打开一篇文档', true);
     return;
   }
-  const label = prompt('快照标签（可留空，如 v1 评审稿）', '')?.trim() || undefined;
+  const label = await askText({ title: '保存快照', label: '快照标签（可留空，如 v1 评审稿）', value: '', confirmLabel: '保存' });
+  if (label === null) return; // 取消就别建快照（原来 prompt 取消也会落一个无标签快照）
+  const tag = label.trim() || undefined;
   try {
     const res = await fetch(`/api/docs/${currentDocId}/snapshots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label }),
+      body: JSON.stringify({ label: tag }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    setStatus('已保存快照' + (label ? '：' + label : ''));
+    setStatus('已保存快照' + (tag ? '：' + tag : ''));
     void refreshSnapshots();
   } catch (e) {
     setStatus('保存快照失败：' + (e as Error).message, true);
@@ -1378,7 +1389,11 @@ function previewSnapshot(snap: SnapshotRow): void {
 
 async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
   if (currentDocId == null) return;
-  if (!confirm(`恢复到「${snap.label || '未命名'}」？\n将覆盖当前内容，系统会先自动保留一个"恢复前"快照。`)) return;
+  const ok = await askConfirm('将覆盖当前内容，系统会先自动保留一个「恢复前」快照。', {
+    title: `恢复到「${snap.label || '未命名'}」？`,
+    confirmLabel: '恢复',
+  });
+  if (!ok) return;
   try {
     // 恢复前自动留一个兜底快照
     await fetch(`/api/docs/${currentDocId}/snapshots`, {
@@ -1400,7 +1415,12 @@ async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
 }
 
 async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
-  if (!confirm('删除该快照？不影响当前文档内容。')) return;
+  const ok = await askConfirm('不影响当前文档内容。', {
+    title: '删除该快照？',
+    confirmLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}`, { method: 'DELETE' });
     setStatus('已删除快照');

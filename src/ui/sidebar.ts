@@ -1,4 +1,5 @@
 import { removeHandle } from './fileHandles';
+import { askConfirm, askText } from './dialog';
 
 // ─── 文档树（按 doc_key 的 "/" 分段构建可折叠树）────────────────
 
@@ -404,7 +405,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   }
 
   const createDoc = async (): Promise<void> => {
-    const path = prompt('新文档路径（可含文件夹，如 notes/我的文档.md）', '新文档.md');
+    const path = await askText({
+      title: '新建文档',
+      label: '文档路径（可含文件夹，如 notes/我的文档.md）',
+      value: '新文档.md',
+      confirmLabel: '创建',
+    });
     if (!path || !path.trim()) return;
     const docKey = path.trim();
     const filename = docKey.slice(docKey.lastIndexOf('/') + 1);
@@ -420,7 +426,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       await refresh();
       opts.onOpen(r.id);
     } catch (e) {
-      alert('新建失败：' + (e as Error).message);
+      opts.onStatus?.('新建失败：' + (e as Error).message, true);
     }
   };
 
@@ -434,7 +440,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   }
 
   const createFolder = async (): Promise<void> => {
-    const path = prompt('新文件夹路径（如 项目/2026）', '未命名文件夹');
+    const path = await askText({
+      title: '新建文件夹',
+      label: '文件夹路径（如 项目/2026）',
+      value: '未命名文件夹',
+      confirmLabel: '创建',
+    });
     if (!path || !path.trim()) return;
     try {
       const res = await fetch('/api/archive/folders', {
@@ -445,7 +456,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (e) {
-      alert('新建文件夹失败：' + (e as Error).message);
+      opts.onStatus?.('新建文件夹失败：' + (e as Error).message, true);
     }
   };
 
@@ -518,7 +529,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   });
 
   const renameDoc = async (doc: SidebarDoc): Promise<void> => {
-    const newKey = prompt('新路径（可含文件夹）', doc.doc_key);
+    const newKey = await askText({
+      title: '重命名文档',
+      label: '新路径（可含文件夹）',
+      value: doc.doc_key,
+      confirmLabel: '重命名',
+    });
     if (!newKey || newKey.trim() === doc.doc_key) return;
     try {
       const res = await fetch(`/api/docs/${doc.id}/rename`, {
@@ -531,24 +547,34 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       opts.onRenamed(doc.doc_key, newKey.trim());
       await refresh();
     } catch (err) {
-      alert('重命名失败：' + (err as Error).message);
+      opts.onStatus?.('重命名失败：' + (err as Error).message, true);
     }
   };
 
   const deleteDoc = async (doc: SidebarDoc): Promise<void> => {
-    if (!confirm(`删除「${doc.title}」？\n仅删除工作区记录，不影响磁盘原文件与图床。`)) return;
+    const ok = await askConfirm(`删除「${doc.title}」？\n仅删除工作区记录，不影响磁盘原文件与图床。`, {
+      title: '删除文档',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/docs/${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       await removeHandle(doc.doc_key);
       await refresh();
     } catch (err) {
-      alert('删除失败：' + (err as Error).message);
+      opts.onStatus?.('删除失败：' + (err as Error).message, true);
     }
   };
 
   const moveArchive = async (entry: ArchiveEntry): Promise<void> => {
-    const next = prompt('新的归档路径', entry.archive_path);
+    const next = await askText({
+      title: '移动归档',
+      label: '新的归档路径',
+      value: entry.archive_path,
+      confirmLabel: '移动',
+    });
     if (!next || next.trim() === entry.archive_path) return;
     try {
       const res = await fetch(`/api/docs/${entry.id}/archive-path`, {
@@ -559,7 +585,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('移动失败：' + (err as Error).message);
+      opts.onStatus?.('移动失败：' + (err as Error).message, true);
     }
   };
 
@@ -577,7 +603,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   };
 
   const renameFolder = async (from: string): Promise<void> => {
-    const to = prompt('新的文件夹路径', from);
+    const to = await askText({
+      title: '重命名文件夹',
+      label: '新的文件夹路径',
+      value: from,
+      confirmLabel: '重命名',
+    });
     if (!to || to.trim() === from) return;
     try {
       const res = await fetch('/api/archive/folders/rename', {
@@ -588,18 +619,23 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('重命名失败：' + (err as Error).message);
+      opts.onStatus?.('重命名失败：' + (err as Error).message, true);
     }
   };
 
   const deleteFolder = async (path: string): Promise<void> => {
-    if (!confirm(`删除文件夹「${path}」？\n仅当其中没有归档文档时可以删除。`)) return;
+    const ok = await askConfirm(`删除文件夹「${path}」？\n仅当其中没有归档文档时可以删除。`, {
+      title: '删除文件夹',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch('/api/archive/folders?path=' + encodeURIComponent(path), { method: 'DELETE' });
       if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
-      alert('删除失败：' + (err as Error).message);
+      opts.onStatus?.('删除失败：' + (err as Error).message, true);
     }
   };
 

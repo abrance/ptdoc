@@ -9,11 +9,19 @@
 //
 // 模态关闭走它自己的关闭按钮（`#xxx-close`），这样 publish-diff 那类
 // 「await 一个 Promise」的弹窗能正常 resolve，不会留悬挂的 Promise。
+// 原生 <dialog>（dialog.ts 的确认/输入框）走 close()，同样能 resolve。
 
 let lastDrawer: HTMLElement | null = null;
 
-/** 关掉最上层浮层（模态优先，其次抽屉）。返回是否真的关掉了东西。 */
+/** 关掉最上层浮层（原生 dialog → 模态 → 抽屉）。返回是否真的关掉了东西。 */
 export function closeTopOverlay(): boolean {
+  // 原生 dialog 自带 top-layer，一定在最上面；Esc 交给它自己的 close()，
+  // 否则会「对话框还开着，身后抽屉被关掉」。
+  const dialogs = document.querySelectorAll<HTMLDialogElement>('dialog[open]');
+  if (dialogs.length > 0) {
+    dialogs[dialogs.length - 1].close();
+    return true;
+  }
   const modal = document.querySelector<HTMLElement>('.modal-backdrop.open');
   if (modal) {
     const close = modal.querySelector<HTMLElement>('button[id$="-close"]');

@@ -1,3 +1,5 @@
+import { askConfirm, askText } from './dialog';
+
 interface Conv {
   id: number;
   scene: string;
@@ -88,11 +90,16 @@ export function initAgentChat(opts: {
       draft = '';
       document.getElementById('agent-draft')!.hidden = true;
     };
-    document.getElementById('agent-convs')!.addEventListener('click', (e) => {
+    document.getElementById('agent-convs')!.addEventListener('click', async (e) => {
       const li = (e.target as HTMLElement).closest<HTMLElement>('li[data-id]');
       const del = (e.target as HTMLElement).closest<HTMLElement>('button[data-del]');
       if (del && li) {
-        if (!confirm('删除该对话？')) return;
+        const ok = await askConfirm('对话记录会被删除，已写入文档的内容不受影响。', {
+          title: '删除该对话？',
+          confirmLabel: '删除',
+          danger: true,
+        });
+        if (!ok) return;
         void fetch('/api/agents/conversations/' + li.dataset.id, { method: 'DELETE' }).then(() => {
           if (String(convId) === li.dataset.id) convId = null;
           void refresh();
@@ -266,7 +273,7 @@ export function initAgentChat(opts: {
 
   const retrieve = async (): Promise<void> => {
     if (!convId) return;
-    const q = prompt('补充检索查询');
+    const q = await askText({ title: '补充检索', label: '检索查询', confirmLabel: '检索' });
     if (!q) return;
     const res = await fetch('/api/agents/conversations/' + convId + '/retrieve', {
       method: 'POST',
@@ -311,11 +318,20 @@ export function initAgentChat(opts: {
     const preview = (diff.hunks || [])
       .map((h) => h.lines.map((l) => (h.type === 'add' ? '+ ' : h.type === 'del' ? '- ' : '  ') + l).join('\n'))
       .join('\n');
-    if (!confirm('确认接受以下差异并写入？\n\n' + preview.slice(0, 2000))) return;
+    const ok = await askConfirm('接受以下差异并写入？\n\n' + preview.slice(0, 2000), {
+      title: '确认智能体改动',
+      confirmLabel: '写入',
+    });
+    if (!ok) return;
     const body: Record<string, unknown> = { mode, content: draft };
     if (mode === 'replace-current') body.doc_id = opts.getCurrentDocId();
     if (mode === 'create') {
-      const key = prompt('新文档路径（doc_key）', 'notes/draft.md');
+      const key = await askText({
+        title: '另存为新文档',
+        label: '新文档路径（doc_key）',
+        value: 'notes/draft.md',
+        confirmLabel: '创建',
+      });
       if (!key) return;
       body.doc_key = key;
     }
