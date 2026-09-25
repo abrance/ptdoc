@@ -53,7 +53,7 @@ let tocScrollCleanup: (() => void) | null = null;
 
 function render(): void {
   preview.innerHTML = renderMarkdown(editor.value);
-  renderMermaidBlocks(preview);
+  void renderMermaidBlocks(preview);
   bindInternalLinks();
   // 目录面板开着时：注入锚点 + 重建目录 + 重挂滚动高亮
   if (tocScrollCleanup) {
@@ -217,6 +217,54 @@ function setSidebarOpen(open: boolean): void {
   writePref('sidebar', open);
 }
 
+// ─── 顶栏宽屏收纳 ────────────────────────────────────────
+// 窄屏时顶栏十几个按钮会横向溢出（溢出部分还会被 overflow-x 隐掉看不见），
+// 把次要按钮（目录/快照/历史/智能体）搬进「更多」菜单；宽屏再搬回原位。
+// 用移动节点（而不是写两份按钮）避免重复 id，原来挂的监听也不会丢。
+const MORE_MENU_QUERY = window.matchMedia('(max-width: 1100px)');
+const MORE_MENU_IDS = ['toc-toggle', 'snapshots', 'history', 'agent'];
+
+function syncMoreMenu(): void {
+  const menu = $('more-menu') as HTMLDetailsElement;
+  const list = $('more-list');
+  const group = $('action-secondary');
+  for (const id of MORE_MENU_IDS) {
+    const btn = $(id);
+    if (MORE_MENU_QUERY.matches) list.appendChild(btn);
+    else group.appendChild(btn);
+  }
+  if (!MORE_MENU_QUERY.matches) menu.open = false;
+}
+
+// 下拉菜单用 position: fixed（见 styles.css），要自己摆位置才能脱离 .actions 的
+// overflow 裁剪；窗口尺寸变了就干脆关掉，下次打开重算。
+function positionMoreMenu(): void {
+  const menu = $('more-menu') as HTMLDetailsElement;
+  if (!menu.open) return;
+  const summary = menu.querySelector('summary') as HTMLElement;
+  const r = summary.getBoundingClientRect();
+  const list = $('more-list');
+  list.style.top = r.bottom + 6 + 'px';
+  list.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+}
+
+function initMoreMenu(): void {
+  const menu = $('more-menu') as HTMLDetailsElement;
+  syncMoreMenu();
+  MORE_MENU_QUERY.addEventListener('change', syncMoreMenu);
+  menu.addEventListener('toggle', positionMoreMenu);
+  // 点任意一项就收起，点别处也收起
+  $('more-list').addEventListener('click', () => {
+    menu.open = false;
+  });
+  document.addEventListener('click', (e) => {
+    if (menu.open && !menu.contains(e.target as Node)) menu.open = false;
+  });
+  window.addEventListener('resize', () => {
+    menu.open = false;
+  });
+}
+
 function initLayoutChrome(): void {
   const prefs = readPrefs();
   setWorkspaceView(isMobileLayout() ? 'edit' : prefs.view ?? 'split');
@@ -226,6 +274,7 @@ function initLayoutChrome(): void {
     setSplitRatio(mainEl, prefs.split);
   }
   if (prefs.toc) toggleToc(true);
+  initMoreMenu();
   $('view-edit').addEventListener('click', () => setWorkspaceView('edit'));
   $('view-split').addEventListener('click', () => setWorkspaceView('split'));
   $('view-preview').addEventListener('click', () => setWorkspaceView('preview'));
@@ -1463,7 +1512,13 @@ document.addEventListener('keydown', (e) => {
     void saveCurrentDoc();
   }
   if (e.key === 'Escape') {
-    // 先关浮层；没有浮层时在窄屏收起文档树抽屉，不抢 Esc 的其它用途。
+    // 先收顶栏的「更多」菜单（它是最小的浮层），再按 dialog / 模态 / 抽屉的顺序关；
+    // 都没开时在窄屏收起文档树抽屉，不抢 Esc 的其它用途。
+    const menu = $('more-menu') as HTMLDetailsElement;
+    if (menu.open) {
+      menu.open = false;
+      return;
+    }
     if (closeTopOverlay()) return;
     if (isMobileLayout() && document.body.classList.contains('sidebar-open')) setSidebarOpen(false);
   }
