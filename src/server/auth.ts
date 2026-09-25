@@ -4,6 +4,7 @@ import { getServerEnv } from './env.ts';
 import { HttpError, parseCookies, SESSION_COOKIE, setSessionCookie } from './http.ts';
 import {
   deleteSession,
+  getUserByApiTokenHash,
   getSessionUser,
   insertSession,
   touchSession,
@@ -16,6 +17,7 @@ const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 32;
 const USERNAME_RE = /^[a-zA-Z0-9._-]{3,32}$/;
+const API_TOKEN_RE = /^[A-Za-z0-9]{16,64}$/;
 const MAX_FAILS = 5;
 const LOCK_MS = 15 * 60 * 1000;
 
@@ -34,6 +36,20 @@ export function validatePassword(password: string): string {
     throw new HttpError(400, '密码长度为 8–72 个字符');
   }
   return password;
+}
+
+export function validateApiToken(raw: string): string {
+  const t = raw.trim();
+  if (!API_TOKEN_RE.test(t)) {
+    throw new HttpError(400, 'API Token 为 16–64 位字母或数字');
+  }
+  return t;
+}
+
+export function parseBearer(authorization: string): string {
+  const m = authorization.match(/^Bearer\s+(\S+)\s*$/i);
+  if (!m) throw new HttpError(401, '未登录');
+  return m[1];
 }
 
 export function hashPassword(password: string): string {
@@ -74,6 +90,15 @@ export function readSessionToken(req: IncomingMessage): string {
 }
 
 export function requireUser(req: IncomingMessage, res: ServerResponse): UserRow {
+  const authz = req.headers.authorization;
+  if (authz !== undefined) {
+    const raw = Array.isArray(authz) ? authz[0] || '' : authz;
+    const token = parseBearer(raw);
+    const user = getUserByApiTokenHash(hashToken(token));
+    if (!user) throw new HttpError(401, '未登录');
+    if (user.status === 'disabled') throw new HttpError(403, '账号已停用');
+    return user;
+  }
   const token = readSessionToken(req);
   if (!token) throw new HttpError(401, '未登录');
   const user = getSessionUser(hashToken(token));
@@ -124,6 +149,7 @@ export function toPublicUser(user: UserRow): {
   role: UserRole;
   status: UserRow['status'];
   created_at: number;
+  has_api_token: boolean;
 } {
   return {
     id: user.id,
@@ -131,6 +157,7 @@ export function toPublicUser(user: UserRow): {
     role: user.role,
     status: user.status,
     created_at: user.created_at,
+    has_api_token: !!user.api_token_hash,
   };
 }
 
