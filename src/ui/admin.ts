@@ -1,3 +1,5 @@
+import { askConfirm, askText } from './dialog';
+
 interface AdminUser {
   id: number;
   username: string;
@@ -118,7 +120,7 @@ export function initAdminPanel(opts: {
       void saveExt();
     });
     (document.querySelector('#ext-form [name="kind"]') as HTMLSelectElement).addEventListener('change', syncKindUi);
-    document.getElementById('ext-list')!.addEventListener('click', (e) => {
+    document.getElementById('ext-list')!.addEventListener('click', async (e) => {
       const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
       const li = (e.target as HTMLElement).closest<HTMLElement>('li[data-id]');
       if (!li) return;
@@ -132,7 +134,12 @@ export function initAdminPanel(opts: {
         return;
       }
       if (btn?.dataset.op === 'del') {
-        if (!confirm('确认删除该扩展？文件目录会一并移除。')) return;
+        const ok = await askConfirm('文件目录会一并移除。', {
+          title: '确认删除该扩展？',
+          confirmLabel: '删除',
+          danger: true,
+        });
+        if (!ok) return;
         void extAction(id, 'delete');
         return;
       }
@@ -268,7 +275,13 @@ export function initAdminPanel(opts: {
     const kind = ((form.elements.namedItem('kind') as HTMLSelectElement).value || editingKind) as ExtRow['kind'];
     const name = (form.elements.namedItem('name') as HTMLInputElement).value.trim();
     if (!name) return opts.onStatus('名称不能为空', true);
-    if (editingId && !confirm('确认覆盖保存该扩展？')) return;
+    if (editingId) {
+      const ok = await askConfirm('覆盖保存会替换该扩展当前配置。', {
+        title: '确认覆盖保存该扩展？',
+        confirmLabel: '覆盖保存',
+      });
+      if (!ok) return;
+    }
     try {
       if (kind === 'mcp') {
         const body: Record<string, unknown> = {
@@ -357,7 +370,12 @@ export function initAdminPanel(opts: {
   };
 
   const resetPassword = async (id: number): Promise<void> => {
-    const password = prompt('新密码（至少 8 位）');
+    const password = await askText({
+      title: '重置密码',
+      label: '新密码（至少 8 位）',
+      type: 'password',
+      confirmLabel: '重置',
+    });
     if (!password) return;
     const res = await fetch(`/api/admin/users/${id}/reset-password`, {
       method: 'POST',

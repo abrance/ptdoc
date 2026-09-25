@@ -1137,6 +1137,149 @@ body.toc-on .preview-pane {
   border-top: 1px solid var(--border);
 }
 
+/* ─── 应用内确认/输入框（原生 <dialog>，替代 confirm/prompt）─── */
+.app-dialog {
+  width: 420px;
+  max-width: 92vw;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 16px 48px var(--shadow-modal-color);
+}
+
+.app-dialog::backdrop {
+  background: var(--scrim);
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.dialog-x {
+  border: 0;
+  background: none;
+  padding: 0 6px;
+  min-height: 28px;
+  color: var(--muted);
+}
+
+.dialog-x:hover {
+  color: var(--accent);
+}
+
+.dialog-body {
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap; /* 业务文案里的换行、差异片段靠它排版 */
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dialog-field input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.dialog-field input:focus-visible,
+.dialog-x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: var(--on-accent);
+  border-color: var(--danger);
+}
+
+.btn-danger:hover {
+  color: var(--on-accent);
+  border-color: var(--danger);
+  filter: brightness(0.94);
+}
+
+/* ─── 瞬时提示（错误/成功反馈，4 秒自动消失）─────────── */
+.toasts {
+  position: fixed;
+  top: calc(var(--topbar-h) + 12px);
+  right: 16px;
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  max-width: 380px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg);
+  transition: opacity var(--ease), transform var(--ease);
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
+.toast-success {
+  border-left-color: var(--success);
+}
+
+.toast.out {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 #share-text,
 #md-view-text {
   flex: 1;
