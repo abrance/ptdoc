@@ -180,6 +180,95 @@ body {
   border-left: 0;
 }
 
+/* ─── 顶栏「更多」菜单（窄屏收纳次要按钮）─────────────── */
+.menu {
+  display: none;
+  position: relative;
+}
+
+.menu > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  list-style: none;
+  user-select: none;
+}
+
+.menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.menu > summary::after {
+  content: '▾';
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.menu > summary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.menu[open] > summary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.menu[open] > summary::after {
+  content: '▴';
+}
+
+/* fixed 而不是 absolute：.actions 有 overflow-x: auto，absolute 下拉会被裁掉 */
+.menu-list {
+  position: fixed;
+  z-index: var(--z-drawer);
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 168px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.menu[open] .menu-list {
+  display: flex;
+}
+
+.menu-list button {
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  border-radius: 6px;
+}
+
+.menu-list button:hover {
+  background: var(--surface);
+  color: var(--fg);
+  border-color: transparent;
+}
+
+@media (max-width: 1100px) {
+  .menu {
+    display: block;
+  }
+
+  /* 四个按钮已被搬进「更多」菜单，这层壳只剩内边距和分割线 */
+  #action-secondary {
+    display: none;
+  }
+}
+
 .view-switch {
   display: flex;
   padding: 3px;

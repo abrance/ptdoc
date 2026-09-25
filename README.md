@@ -30,6 +30,9 @@
   ```bash
   curl -H "Authorization: Bearer $PTDOC_TOKEN" http://localhost:5173/api/docs/full
   ```
+- ⚡ **首屏体积**：Mermaid 引擎（min+gzip 约 480KB）改为**按需加载** —— 只有文档真出现 ` ```mermaid ` 时才会拉这份 chunk，首屏 JS 从 515KB gzip 降到 **46KB gzip**；同一份图源码的 SVG 在会话内缓存，不会再因为每次输入（200ms 防抖）重渲染而重算
+- 🧰 **顶栏窄屏收纳**：窗口窄于 1100px 时，「目录 / 快照 / 历史 / 智能体」自动收进「更多 ▾」菜单（宽屏自动展开回原位），不再横向溢出到看不见
+- ♿ **抽屉无障碍**：七个右侧抽屉都有 `role="dialog"` + `aria-label`（取抽屉标题或触发按钮文案）；打开时焦点进抽屉、关闭时还给触发按钮。抽屉不阻塞页面，所以**故意不标** `aria-modal`
 
 ## 目录结构（胶水 / 业务 / 依赖 三层）
 
