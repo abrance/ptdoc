@@ -1,0 +1,33 @@
+# 打 v* tag 时构建 ptdocctl 并发布 GitHub Release（tar.gz 包，每平台一个 + SHA256SUMS）。
+#
+# 产物下载：https://github.com/abrance/ptdoc/releases
+# 本地打同样内容的包：make ptdocctl（scripts/ptdocctl-package.sh）
+name: ptdocctl Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: ptdocctl/go.mod
+
+      - name: Package
+        run: scripts/ptdocctl-package.sh dist/ptdocctl
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ptdocctl/*.tar.gz
+            dist/ptdocctl/SHA256SUMS
