@@ -8,10 +8,17 @@
 # 产物：ptdocctl-<version>-<os>-<arch>.tar.gz + SHA256SUMS
 set -euo pipefail
 
+# OUT 相对仓库根解析（脚本内部需 cd ptdocctl/ 编译），默认 dist/ptdocctl
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
 cd "$(dirname "$0")/../ptdocctl"
 
-VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
-OUT="${1:-../dist/ptdocctl}"
+VERSION="${VERSION:-$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo dev)}"
+OUT="${1:-$ROOT/dist/ptdocctl}"
+case "$OUT" in
+  /*) ;;
+  *) OUT="$ROOT/$OUT" ;;
+esac
 mkdir -p "$OUT"
 
 TARGETS=(
