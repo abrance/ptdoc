@@ -416,3 +416,46 @@ test('上游 HTTP 错误不吞成空回复：stopReason=error → error 事件 +
     setChatRunnerForTests(null);
   }
 });
+
+test('历史含 assistant 回复时不抛 content.flatMap 错误（线上回归）', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  mockMainResponses = [];
+  mockSubResponses = [];
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  mockResponses = [[textFrame('第二轮回答', 'stop', { prompt_tokens: 6, completion_tokens: 3 })]];
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({
+      userId,
+      scene: 'qa',
+      messages: [
+        { role: 'user', content: '第一问' },
+        { role: 'assistant', content: '第一轮回复' }, // 旧代码：字符串 content → flatMap 崩
+      ],
+      input: '继续',
+      abort: new AbortController().signal,
+    });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+      events.push(r.value);
+    }
+    assert.ok(!events.some((e) => e.type === 'error'), '不应有错误事件: ' + JSON.stringify(events.find((e) => e.type === 'error')));
+    assert.equal(result!.text, '第二轮回答');
+    // 历史回复应作为 text 内容回传给模型
+    const firstMsg = seenRequests[0].messages.find((m: any) => m.role === 'assistant');
+    assert.ok(firstMsg, '请求应含历史 assistant 消息');
+    assert.ok(JSON.stringify(firstMsg.content).includes('第一轮回复'));
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
