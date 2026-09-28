@@ -263,6 +263,11 @@ export function initSettingsPanel(opts: {
     };
     const key = (form.elements.namedItem('llm_api_key') as HTMLInputElement).value.trim();
     if (key) body.api_key = key;
+    // 首次配置必须有 API Key（服务端回填不到）；本地预检给出明确提示，避免裸 400
+    if (!body.base_url || !body.model || (!key && !configured.llm)) {
+      opts.onStatus('请填写 Base URL、模型名，首次配置还需 API Key', true);
+      return;
+    }
     const res = await fetch('/api/agents/llm', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -284,6 +289,10 @@ export function initSettingsPanel(opts: {
     };
     const key = (form.elements.namedItem('qdrant_api_key') as HTMLInputElement).value.trim();
     if (key) body.api_key = key;
+    if (!body.url || !body.collection) {
+      opts.onStatus('请填写 Qdrant URL 与 Collection', true);
+      return;
+    }
     const res = await fetch('/api/agents/qdrant', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
