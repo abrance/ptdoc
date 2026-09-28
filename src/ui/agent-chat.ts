@@ -1,4 +1,6 @@
 import { askConfirm, askText } from './dialog';
+import { renderMarkdown } from '../core/markdown';
+import { renderMermaidBlocks } from '../core/mermaid';
 
 interface Conv {
   id: number;
@@ -114,10 +116,11 @@ export function initAgentChat(opts: {
       .join('');
   };
 
-  /** FR-14：qa 场景把正文 [n] 替换为可点击引用角标（无 hits 返回 null 用原文本） */
-  const renderCites = (content: string): string | null => {
-    if (scene !== 'qa' || !hits.length) return null;
-    return escapeHtml(content).replace(/\[(\d+)\]/g, (m, n) => {
+  /** FR-14：qa 场景在渲染后的 HTML 上把 [n] 文本替换为可点击角标（无 hits 返回原 HTML）。
+   *  在 markdown 渲染后的 HTML 上做，避免破坏代码块/链接内的方括号。 */
+  const renderCites = (html: string): string => {
+    if (scene !== 'qa' || !hits.length) return html;
+    return html.replace(/\[(\d+)\](?!\()/g, (m, n) => {
       const i = Number(n) - 1;
       return i >= 0 && i < hits.length ? `<sup class="cite" data-cite="${i}">[${n}]</sup>` : m;
     });
@@ -244,13 +247,16 @@ export function initAgentChat(opts: {
           t.status === 'error'
             ? `<div class="msg-error">${escapeHtml(t.error_message || '生成失败')}<button type="button" data-retry="${t.id}">重试</button></div>`
             : '';
-        const cites = isAsst ? renderCites(t.content) : null;
-        const body = cites ?? `<pre>${escapeHtml(t.content)}</pre>`;
+        // assistant 消息 markdown 渲染（与文档预览同一管线：marked GFM + mermaid SVG + markdown-body 样式）
+        const body = isAsst
+          ? `<div class="markdown-body agent-md">${renderCites(renderMarkdown(t.content))}</div>`
+          : `<pre>${escapeHtml(t.content)}</pre>`;
         const think = isAsst ? thinkHtml(t.thinking || '') : '';
         return `<div class="msg ${t.role}${errCls}">${meta}${think}${body}${errBar}${hand}</div>`;
       })
       .join('');
     box.scrollTop = box.scrollHeight;
+    void renderMermaidBlocks(box);
     if (trace) renderObs(trace);
     else renderObs();
   };
