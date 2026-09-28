@@ -376,3 +376,43 @@ test('子代理：上限 3，第 4 个 spawn 被拒（FR-13）', async () => {
     setChatRunnerForTests(null);
   }
 });
+
+test('上游 HTTP 错误不吞成空回复：stopReason=error → error 事件 + errorText（线上回归）', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  // 独立 mock：直接返回 HTTP 500
+  const errServer = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: '上游模型过载' } }));
+    });
+  });
+  await new Promise<void>((r) => errServer.listen(0, '127.0.0.1', () => r()));
+  const errPort = (errServer.address() as any).port as number;
+  upsertLlmProfile(userId, `http://127.0.0.1:${errPort}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: 'hi', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+      events.push(r.value);
+    }
+    // 必须有 error 事件（以前被吞成空回复 status ok）
+    const errEv = events.find((e) => e.type === 'error');
+    assert.ok(errEv, '应有 error 事件');
+    assert.ok(errEv.errorText && errEv.errorText.length > 0, 'errorText 应含上游信息');
+    assert.equal(result!.text, '');
+    assert.equal(result!.errorText, errEv.errorText);
+  } finally {
+    errServer.close();
+    setChatRunnerForTests(null);
+  }
+});

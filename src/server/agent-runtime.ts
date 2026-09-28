@@ -278,8 +278,12 @@ async function runToolLoop(opts: ToolLoopOpts): Promise<{ text: string; thinking
       }
       assistant = await stream.result();
     } catch (e) {
-      if ((e as Error).name === 'AbortError') break;
+      if ((e as Error).name === 'AbortError' || streamOpts.signal.aborted) break;
       throw e;
+    }
+    // pi-ai 对上游失败不抛异常：result() 正常 resolve（stopReason='error' + errorMessage）
+    if (assistant.stopReason === 'error') {
+      throw new Error(assistant.errorMessage || '大模型请求失败');
     }
     // 防丢帧：以最终 message 为准校正文本（缺尾部则补发增量）
     const fullText = assistant.content
@@ -457,8 +461,15 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
       }
       assistant = await stream.result();
     } catch (e) {
-      if ((e as Error).name === 'AbortError') break;
+      if ((e as Error).name === 'AbortError' || streamOpts.signal.aborted) break;
       lastError = ((e as Error).message || '大模型请求失败').slice(0, 200);
+      yield { type: 'error', errorText: lastError };
+      return { text, thinking, hits, spans, model: model.id, inputTokens, outputTokens, errorText: lastError };
+    }
+    // pi-ai 对上游失败不抛异常：result() 正常 resolve（stopReason='error' + errorMessage），
+    // 必须显式检查，否则错误被吞成空回复（status ok、tokens 0）
+    if (assistant.stopReason === 'error') {
+      lastError = (assistant.errorMessage || '大模型请求失败').slice(0, 200);
       yield { type: 'error', errorText: lastError };
       return { text, thinking, hits, spans, model: model.id, inputTokens, outputTokens, errorText: lastError };
     }
