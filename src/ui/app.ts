@@ -9,7 +9,7 @@ import { renderToc, attachTocScrollHighlight } from './toc';
 import { initSidebar } from './sidebar';
 import { initMediaPanel } from './media';
 import { startGate, logout, type SessionUser } from './gate';
-import { initSettingsPanel } from './settings';
+import { initSettingsPanel, type SettingsSectionId, syncSettingsDots } from './settings';
 import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
 import { initOverlayManager, closeTopOverlay } from './overlay';
@@ -217,12 +217,50 @@ function setSidebarOpen(open: boolean): void {
   writePref('sidebar', open);
 }
 
+// ─── Workbench 一级导航（视图/检索/场景/集成）──────────────
+// 顶栏 Tab 决定左侧 Sider 显示哪一页；检索/场景的树形导航直接住在 Sider 里，
+// 不再走右侧抽屉。切到非视图页时如果侧栏是收起的，自动展开。
+type NavPage = 'docs' | 'archive' | 'agent' | 'share' | 'settings';
+let navPage: NavPage = 'docs';
+
+function setNav(page: NavPage): void {
+  navPage = page;
+  document.body.dataset.nav = page;
+  document.querySelectorAll<HTMLButtonElement>('.nav-tabs button').forEach((b) => {
+    const on = b.dataset.nav === page;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  // Sider 分页 + 主界面双切（Workbench：每个 Tab = Sider 导航 + 主界面）
+  document.querySelectorAll<HTMLElement>('.sider-page').forEach((p) => {
+    p.classList.toggle('active', p.dataset.page === page);
+  });
+  document.querySelectorAll<HTMLElement>('.main-page').forEach((m) => {
+    m.classList.toggle('active', m.dataset.main === page || (page === 'archive' && m.dataset.main === 'docs'));
+  });
+  // 归档 Tab 复用文档工作台：视图切换按钮仅在文档/归档页有意义
+  const docTabs = document.querySelector('.view-switch') as HTMLElement | null;
+  if (docTabs) docTabs.style.visibility = page === 'docs' || page === 'archive' ? '' : 'hidden';
+  if (page !== 'docs') {
+    if (isMobileLayout()) setSidebarOpen(true);
+    else if (document.body.classList.contains('sidebar-collapsed')) setSidebarOpen(true);
+  }
+  if (page === 'agent') void refreshNavConvs();
+  if (page === 'settings') void syncSettingsDots();
+}
+
+function initNav(): void {
+  document.querySelectorAll<HTMLButtonElement>('.nav-tabs button').forEach((b) => {
+    b.addEventListener('click', () => setNav(b.dataset.nav as NavPage));
+  });
+}
+
 // ─── 顶栏宽屏收纳 ────────────────────────────────────────
 // 窄屏时顶栏十几个按钮会横向溢出（溢出部分还会被 overflow-x 隐掉看不见），
 // 把次要按钮（目录/快照/历史/智能体）搬进「更多」菜单；宽屏再搬回原位。
 // 用移动节点（而不是写两份按钮）避免重复 id，原来挂的监听也不会丢。
 const MORE_MENU_QUERY = window.matchMedia('(max-width: 1100px)');
-const MORE_MENU_IDS = ['toc-toggle', 'snapshots', 'history', 'agent'];
+const MORE_MENU_IDS = ['toc-toggle', 'snapshots'];
 
 function syncMoreMenu(): void {
   const menu = $('more-menu') as HTMLDetailsElement;
@@ -267,6 +305,7 @@ function initMoreMenu(): void {
 
 function initLayoutChrome(): void {
   const prefs = readPrefs();
+  initNav();
   setWorkspaceView(isMobileLayout() ? 'edit' : prefs.view ?? 'split');
   setSidebarOpen(prefs.sidebar ?? !isMobileLayout());
   const mainEl = document.querySelector('.workspace-main') as HTMLElement | null;
@@ -279,6 +318,11 @@ function initLayoutChrome(): void {
   $('view-split').addEventListener('click', () => setWorkspaceView('split'));
   $('view-preview').addEventListener('click', () => setWorkspaceView('preview'));
   $('sidebar-toggle').addEventListener('click', () => {
+    // 非「文档」页下侧栏就是当前导航的内容区，按钮回到「文档」页而不是把它关掉
+    if (navPage !== 'docs') {
+      setNav('docs');
+      return;
+    }
     const open = isMobileLayout()
       ? !document.body.classList.contains('sidebar-open')
       : document.body.classList.contains('sidebar-collapsed');
@@ -344,6 +388,7 @@ function toggleToc(force?: boolean): void {
   if (tocOpen) render();
   else setStatus('');
 }
+
 function insertAtCursor(text: string): void {
   const start = editor.selectionStart;
   const end = editor.selectionEnd;
@@ -889,61 +934,22 @@ async function openInternalLink(href: string): Promise<void> {
   }
 }
 
-// ─── 历史 / 搜索 ────────────────────────────────────────
-$('history').addEventListener('click', toggleHistory);
+// ─── 全局搜索（顶栏搜索框：全文搜索 + 最近打开）───
+// Ctrl+K 聚焦；有词全文搜索（MiniSearch），无词列出最近打开。
 
 // 当前列表（供键盘上下选择 / 补全）
 let historyItems: Array<{ id: number; doc_key: string }> = [];
 let historyActive = -1;
 
-function toggleHistory(): void {
-  const drawer = ensureHistoryDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) {
-    const search = $('history-search') as HTMLInputElement;
-    search.value = '';
-    search.focus();
-    refreshHistory('');
-  }
-}
-
-function ensureHistoryDrawer(): HTMLElement {
-  let drawer = document.getElementById('history-drawer');
-  if (drawer) return drawer;
-  drawer = document.createElement('div');
-  drawer.id = 'history-drawer';
-  drawer.className = 'drawer';
-  drawer.innerHTML = `
-    <div class="drawer-head">
-      <input id="history-search" type="search" placeholder="搜索 / 快速打开（↑↓ 选择，↵ 打开）…" />
-      <button id="history-close" type="button">✕</button>
-    </div>
-    <ul id="history-list" class="history-list"></ul>`;
-  document.body.appendChild(drawer);
-  const search = $('history-search') as HTMLInputElement;
-  search.addEventListener('input', () => {
-    historyActive = -1;
-    refreshHistory(search.value);
-  });
-  search.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); moveHistory(1); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); moveHistory(-1); }
-    else if (e.key === 'Enter') { e.preventDefault(); openHistoryActive(); }
-    else if (e.key === 'Escape') { drawer.classList.remove('open'); }
-  });
-  $('history-close').addEventListener('click', () => drawer.classList.remove('open'));
-  return drawer;
-}
-
-function moveHistory(delta: number): void {
+function setNavSearchActive(idx: number): void {
   if (historyItems.length === 0) return;
-  historyActive = (historyActive + delta + historyItems.length) % historyItems.length;
-  const nodes = $('history-list').querySelectorAll('.history-item');
+  historyActive = (historyActive + idx + historyItems.length) % historyItems.length;
+  const nodes = $('global-search-list').querySelectorAll('.history-item');
   nodes.forEach((n, i) => n.classList.toggle('active', i === historyActive));
   (nodes[historyActive] as HTMLElement)?.scrollIntoView({ block: 'nearest' });
 }
 
-function openHistoryActive(): void {
+function openNavSearchActive(): void {
   const item = historyItems[historyActive];
   if (item) openDocById(item.id);
 }
@@ -1025,7 +1031,7 @@ function renderSearchResults(q: string, list: HTMLElement): void {
 }
 
 async function refreshHistory(q: string): Promise<void> {
-  const list = $('history-list');
+  const list = $('global-search-list');
   if (q.trim()) {
     try {
       await ensureSearchIndex();
@@ -1066,6 +1072,74 @@ async function refreshHistory(q: string): Promise<void> {
     historyActive = 0;
   } catch {
     list.innerHTML = '<li class="empty">加载失败</li>';
+  }
+}
+
+function closeGlobalSearch(): void {
+  $('global-search-pop').hidden = true;
+}
+
+function initGlobalSearch(): void {
+  const input = $('global-search') as HTMLInputElement;
+  const pop = $('global-search-pop');
+  let closeTimer: number | undefined;
+  const open = (): void => {
+    historyActive = -1;
+    void refreshHistory(input.value).then(() => {
+      pop.hidden = false;
+    });
+  };
+  input.addEventListener('focus', () => {
+    clearTimeout(closeTimer);
+    open();
+  });
+  input.addEventListener('input', open);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setNavSearchActive(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setNavSearchActive(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); openNavSearchActive(); }
+    else if (e.key === 'Escape') closeGlobalSearch();
+  });
+  // 延迟失焦收起：让结果项的 click 先触发
+  input.addEventListener('blur', () => {
+    closeTimer = window.setTimeout(closeGlobalSearch, 150);
+  });
+  document.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('.global-search')) closeGlobalSearch();
+  });
+}
+
+// ─── 智能体 Sider 导航（场景 + 会话列表）─────────────
+// 场景切换 / 选中会话都在 Sider 完成；右侧主界面展示消息流与输入区。
+interface NavConv { id: number; scene: 'qa' | 'writer'; title: string; }
+let navConvs: NavConv[] = [];
+let navScene: 'qa' | 'writer' = 'qa';
+
+async function refreshNavConvs(): Promise<void> {
+  const list = $('nav-convs');
+  try {
+    const rows = (await (await fetch('/api/agents/conversations?scene=' + navScene)).json()) as NavConv[];
+    navConvs = rows || [];
+  } catch {
+    navConvs = [];
+  }
+  const count = document.querySelector<HTMLElement>(`[data-count="${navScene}"]`);
+  if (count) count.textContent = String(navConvs.length);
+  list.innerHTML = '';
+  if (navConvs.length === 0) {
+    list.innerHTML = '<li class="empty">暂无会话，点「新对话」开始</li>';
+    return;
+  }
+  for (const c of navConvs) {
+    const li = document.createElement('li');
+    li.className = 'history-item nav-conv-item';
+    li.innerHTML = `<div class="hi-title">${escapeHtml(c.title || '未命名')}</div>`;
+    li.addEventListener('click', () => {
+      const agentPanel = (window as any).__ptdocAgent;
+      if (agentPanel) agentPanel.openConv(c.id, c.scene);
+      else setStatus('智能体尚未就绪', true);
+    });
+    list.appendChild(li);
   }
 }
 
@@ -1124,8 +1198,7 @@ function escapeHtml(s: string): string {
   );
 }
 
-// ─── 分享记录管理 ───────────────────────────────────────
-$('share-list').addEventListener('click', toggleShareListDrawer);
+// ─── 分享记录管理（Sider 分享页）───
 
 interface ShareRow {
   id: number;
@@ -1135,26 +1208,7 @@ interface ShareRow {
   created_at: number;
 }
 
-function toggleShareListDrawer(): void {
-  const drawer = ensureShareListDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) void refreshShareList();
-}
-
-function ensureShareListDrawer(): HTMLElement {
-  let drawer = document.getElementById('share-list-drawer');
-  if (drawer) return drawer;
-  drawer = document.createElement('div');
-  drawer.id = 'share-list-drawer';
-  drawer.className = 'drawer';
-  drawer.innerHTML = `
-    <div class="drawer-head">
-      <span class="drawer-title">分享记录</span>
-      <button id="share-list-close" type="button">✕</button>
-    </div>
-    <ul id="share-list-body" class="history-list"></ul>`;
-  document.body.appendChild(drawer);
-  $('share-list-close').addEventListener('click', () => drawer!.classList.remove('open'));
+function initSharePage(opts: { onStatus: (msg: string, isError?: boolean) => void; onDeleted: () => void }): void {
   const body = $('share-list-body') as HTMLElement;
   body.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
@@ -1165,9 +1219,8 @@ function ensureShareListDrawer(): HTMLElement {
     if (op === 'copy') void copyShareLink(id);
     else if (op === 'open') openShareLink(id);
     else if (op === 'md') void viewShareMd(id);
-    else if (op === 'delete') void deleteShareRecord(id);
+    else if (op === 'delete') void deleteShareRecord(id, opts);
   });
-  return drawer;
 }
 
 async function refreshShareList(): Promise<void> {
@@ -1284,7 +1337,7 @@ function viewShareMd(id: number): void {
   })();
 }
 
-async function deleteShareRecord(id: number): Promise<void> {
+async function deleteShareRecord(id: number, opts?: { onStatus: (msg: string, isError?: boolean) => void; onDeleted: () => void }): Promise<void> {
   const ok = await askConfirm('仅删除本地记录，七牛上已发布的 HTML 仍可访问。', {
     title: '删除这条分享记录？',
     confirmLabel: '删除',
@@ -1295,6 +1348,7 @@ async function deleteShareRecord(id: number): Promise<void> {
     const res = await fetch(`/api/share/${id}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     setStatus('已删除分享记录');
+    opts?.onDeleted();
     void refreshShareList();
   } catch (e) {
     setStatus('删除失败：' + (e as Error).message, true);
@@ -1497,7 +1551,9 @@ editor.addEventListener('input', () => {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) {
     e.preventDefault();
-    toggleHistory();
+    const input = $('global-search') as HTMLInputElement;
+    input.focus();
+    input.select();
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
     e.preventDefault();
@@ -1513,7 +1569,6 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     // 先收顶栏的「更多」菜单（它是最小的浮层），再按 dialog / 模态 / 抽屉的顺序关；
-    // 都没开时在窄屏收起文档树抽屉，不抢 Esc 的其它用途。
     const menu = $('more-menu') as HTMLDetailsElement;
     if (menu.open) {
       menu.open = false;
@@ -1541,7 +1596,13 @@ void startGate((user: SessionUser) => {
   $('logout').onclick = () => void logout();
 
   const settings = initSettingsPanel({ onStatus: setStatus });
-  $('settings').addEventListener('click', () => settings.toggle());
+  // 配置项直达：点哪个组，设置主界面高亮并展开哪个分区
+  document.querySelectorAll<HTMLButtonElement>('[data-settings-section]').forEach((b) =>
+    b.addEventListener('click', () => {
+      settings.openSection(b.dataset.settingsSection as SettingsSectionId);
+      syncSettingsDots();
+    }),
+  );
 
   const agent = initAgentChat({
     onStatus: setStatus,
@@ -1555,8 +1616,20 @@ void startGate((user: SessionUser) => {
       void sidebarRef?.refresh();
       if (mode === 'replace-current' && docId) void openDocById(docId);
     },
+    onConvsChanged: () => void refreshNavConvs(),
   });
-  $('agent').addEventListener('click', () => agent.toggle());
+  initGlobalSearch();
+  // Sider 智能体导航：切场景 / 新对话
+  document.querySelectorAll<HTMLButtonElement>('[data-agent-scene]').forEach((b) =>
+    b.addEventListener('click', () => {
+      navScene = b.dataset.agentScene as 'qa' | 'writer';
+      document.querySelectorAll('[data-agent-scene]').forEach((x) => x.classList.toggle('active', x === b));
+      agent.setScene(navScene);
+      void refreshNavConvs();
+    }),
+  );
+  $('agent-new-nav').addEventListener('click', () => void agent.newConv(navScene));
+  (window as any).__ptdocAgent = agent;
 
   if (user.role === 'admin') {
     $('admin').hidden = false;
@@ -1571,7 +1644,11 @@ void startGate((user: SessionUser) => {
     },
     onStatus: setStatus,
   });
-  $('media').addEventListener('click', () => mediaPanel.toggle());
+  // 分享页主界面：记录列表；媒体库按钮（Sider + 页头）走抽屉
+  initSharePage({ onStatus: setStatus, onDeleted: () => void sidebarRef?.refresh() });
+  for (const btn of document.querySelectorAll('.share-media-btn, #media')) {
+    btn.addEventListener('click', () => mediaPanel.toggle());
+  }
 
   sidebarRef = initSidebar({
     onOpen: (id) => {

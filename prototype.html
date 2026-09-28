@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PTDoc 工作台原型（静态）</title>
+<script>
+  // 首帧定主题
+  (function () {
+    var mode = localStorage.getItem('proto.theme') || 'auto';
+    var dark = mode === 'dark' || (mode === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1f24; --muted: #5b6570; --border: #d8dee6;
+  --surface: #f4f6f8; --accent: #2563eb; --accent-soft: #eff6ff;
+  --on-accent: #fff; --danger: #dc2626; --success: #15803d; --warning: #b45309;
+  --success-soft: #f0fdf4; --warning-soft: #fffbeb; --scrim: rgba(15,23,42,.45);
+  --shadow: 0 10px 28px rgba(15,23,42,.08);
+  --radius: 8px; --topbar-h: 52px; --statusbar-h: 26px; --sidebar-w: 260px;
+  --ease: 160ms ease;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #16191d; --fg: #e3e6ea; --muted: #98a2ad; --border: #2b3037;
+  --surface: #101317; --accent: #6ba1ff; --accent-soft: #1c2a44;
+  --on-accent: #0b0e12; --danger: #ef8b7c; --success: #6ee7a0; --warning: #f5c065;
+  --success-soft: #10231a; --warning-soft: #2a2110;
+  --scrim: rgba(0,0,0,.5); --shadow: 0 10px 28px rgba(0,0,0,.4);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--fg); }
+button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 12px; cursor: pointer; min-height: 28px; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+button.ghost { border-color: transparent; background: transparent; }
+button.ghost:hover { background: var(--surface); }
+input, select, textarea { font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+input:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.app { display: grid; grid-template-rows: auto minmax(0,1fr) auto; height: 100dvh; }
+
+/* ── 顶栏 ─────────────────────────── */
+.topbar { display: grid; grid-template-columns: auto auto minmax(0,1fr) auto minmax(0,1.2fr) auto auto;
+  align-items: center; gap: 12px; min-height: var(--topbar-h); padding: 6px 12px;
+  background: var(--bg); border-bottom: 1px solid var(--border); position: relative; z-index: 10; }
+.brand { font-weight: 700; font-size: 15px; white-space: nowrap; }
+.nav-tabs { display: flex; gap: 2px; }
+.nav-tabs button { border: 0; background: transparent; padding: 6px 14px; font-size: 13px;
+  color: var(--muted); border-radius: 6px; }
+.nav-tabs button:hover { color: var(--fg); background: var(--surface); }
+.nav-tabs button.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.doc-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.doc-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-source { font-size: 11px; color: var(--accent); background: var(--accent-soft);
+  padding: 1px 8px; border-radius: 10px; white-space: nowrap; }
+.global-search { position: relative; width: min(280px, 100%); justify-self: end; }
+.global-search input { width: 100%; font-size: 13px; }
+.global-search-pop { position: absolute; top: calc(100% + 4px); right: 0; width: min(420px, 88vw);
+  max-height: 55vh; overflow: auto; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); display: none; }
+.global-search-pop.open { display: block; }
+.gs-item { padding: 8px 12px; cursor: pointer; }
+.gs-item .t { font-size: 13px; font-weight: 600; }
+.gs-item .m { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.gs-item:hover, .gs-item.active { background: var(--accent-soft); color: var(--accent); }
+.view-switch { display: flex; gap: 2px; background: var(--surface); padding: 2px; border-radius: 8px; }
+.view-switch button { border: 0; background: transparent; padding: 4px 12px; font-size: 12px; border-radius: 6px; }
+.view-switch button.active { background: var(--bg); box-shadow: var(--shadow); color: var(--accent); font-weight: 600; }
+.actions { display: flex; align-items: center; gap: 6px; }
+.badge-btn { position: relative; }
+.badge-btn .badge { position: absolute; top: -6px; right: -6px; background: var(--warning);
+  color: #fff; font-size: 10px; min-width: 16px; height: 16px; line-height: 16px;
+  border-radius: 8px; text-align: center; padding: 0 3px; display: none; }
+.badge-btn.has-badge .badge { display: block; }
+
+/* ── 工作区 ───────────────────────── */
+.workspace { display: grid; grid-template-columns: var(--sidebar-w) minmax(0,1fr); min-height: 0; position: relative; }
+body.sider-collapsed .workspace { grid-template-columns: 0 minmax(0,1fr); }
+body.sider-collapsed .sider { overflow: hidden; border-right: 0; }
+.sider { display: flex; flex-direction: column; background: var(--bg); border-right: 1px solid var(--border);
+  overflow: hidden; min-width: 0; }
+.sider-page { display: none; flex-direction: column; min-height: 0; flex: 1; }
+.sider-page.active { display: flex; }
+.sider-head { display: flex; gap: 6px; padding: 10px; border-bottom: 1px solid var(--border); align-items: center; }
+.sider-head input { flex: 1; min-width: 0; font-size: 13px; }
+.icon-btn { width: 30px; padding: 0; text-align: center; flex: none; }
+.sider-page-title { flex: 1; font-size: 13px; font-weight: 600; }
+.tree { flex: 1; overflow: auto; padding: 6px; }
+.tree ul { list-style: none; margin: 0; padding: 0; }
+.tree .children { margin-left: 14px; }
+.tree-row { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 6px;
+  font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap; }
+.tree-row:hover { background: var(--surface); }
+.tree-row.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.tree-row .caret { width: 14px; font-size: 10px; color: var(--muted); flex: none; }
+.tree-row .ops { margin-left: auto; display: none; gap: 2px; }
+.tree-row:hover .ops { display: inline-flex; }
+.tree-row .ops button { min-height: 0; padding: 1px 6px; font-size: 11px; }
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; flex: none; }
+.tag.ok { color: var(--success); background: var(--success-soft); }
+.tag.stale { color: var(--warning); background: var(--warning-soft); }
+.nav-group { display: flex; flex-direction: column; min-height: 0; flex: 1; border-bottom: 1px solid var(--border); }
+.nav-group:last-child { border-bottom: 0; }
+.nav-group-head { display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.nav-group-head button { padding: 1px 8px; font-size: 12px; min-height: 0; }
+.conv-list { list-style: none; margin: 0; padding: 4px 8px; overflow: auto; flex: 1; }
+.conv-list li { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.conv-list li:hover { background: var(--surface); }
+.conv-list .empty { color: var(--muted); font-size: 12px; cursor: default; }
+.nav-menu { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
+.nav-menu button { text-align: left; border: 0; background: transparent; padding: 9px 12px;
+  font-size: 13px; border-radius: 6px; }
+.nav-menu button:hover { background: var(--surface); }
+.list-plain { list-style: none; margin: 0; padding: 8px; overflow: auto; flex: 1; }
+.list-plain li { padding: 9px 12px; border-radius: 8px; font-size: 13px; }
+.list-plain li:hover { background: var(--surface); }
+.list-plain .m { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.list-plain .ops { display: flex; gap: 5px; margin-top: 6px; }
+.list-plain .ops button { padding: 1px 8px; font-size: 12px; min-height: 0; }
+
+.main-pages { display:grid; min-width:0; min-height:0; }
+.main-page { display:none; min-width:0; min-height:0; grid-area:1/1; }
+.main-page.active { display:block; }
+.main-page .workspace-main { height:100%; }
+.agent-page { display:flex; flex-direction:column; height:100%; min-height:0; background:var(--bg); }
+.agent-page .agent-tabs { display:flex; border-bottom:1px solid var(--border); }
+.agent-page .agent-tabs button { flex:0 0 auto; border:0; border-radius:0; background:transparent; padding:10px 18px; font-size:13px; }
+.agent-page .agent-tabs button.active { color:var(--accent); box-shadow:inset 0 -2px 0 var(--accent); }
+.agent-page .agent-body { display:grid; grid-template-columns:minmax(0,1fr) 240px; flex:1; min-height:0; }
+.agent-page .agent-main { display:flex; flex-direction:column; min-width:0; border-right:1px solid var(--border); }
+.agent-page .agent-obs { overflow:auto; padding:12px; font-size:13px; }
+.agent-page .agent-obs h5 { margin:6px 0; font-size:12px; color:var(--muted); }
+.share-page { height:100%; display:flex; flex-direction:column; min-height:0; background:var(--bg); }
+.page-head { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--border); }
+.page-title { font-size:16px; font-weight:700; }
+.page-hint { flex:1; font-size:12px; color:var(--muted); }
+.share-list-main { flex:1; overflow:auto; padding:14px 20px; max-width:760px; }
+.settings-page { height:100%; overflow:auto; background:var(--bg); padding:18px 22px; }
+.settings-page .settings-accordion { max-width:720px; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+.sider-note { padding:10px 14px; font-size:12px; color:var(--muted); line-height:1.6; border-top:1px solid var(--border); margin-top:auto; }
+.nav-count { margin-left:auto; font-size:11px; color:var(--muted); background:var(--surface); border-radius:8px; padding:0 7px; }
+.nav-menu button.active { color:var(--accent); background:var(--accent-soft); font-weight:600; }
+.workspace-main { display: grid; grid-template-columns: minmax(0,1fr) 6px minmax(0,1fr); min-width: 0; min-height: 0; }
+body.view-edit .workspace-main { grid-template-columns: minmax(0,1fr) 0 0; }
+body.view-preview .workspace-main { grid-template-columns: 0 0 minmax(0,1fr); }
+.pane { overflow: auto; min-width: 0; min-height: 0; }
+#proto-editor { width: 100%; height: 100%; border: 0; resize: none; border-radius: 0;
+  padding: 18px 22px; font-family: ui-monospace, Consolas, monospace; font-size: 13.5px; line-height: 1.7; }
+.preview-pane { background: var(--bg); padding: 26px 34px; }
+.preview-pane h1 { font-size: 24px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.preview-pane h2 { font-size: 18px; margin-top: 28px; }
+.preview-pane p, .preview-pane li { font-size: 14px; line-height: 1.8; color: var(--fg); }
+.mermaid-mock { background: var(--surface); border: 1px dashed var(--border); border-radius: 8px;
+  padding: 24px; text-align: center; color: var(--muted); font-size: 13px; margin: 14px 0; }
+.split-handle { cursor: col-resize; background: var(--border); }
+.split-handle:hover, body.resizing .split-handle { background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+body.view-edit .preview-pane, body.view-edit .split-handle,
+body.view-preview .editor-pane, body.view-preview .split-handle { pointer-events: none; }
+
+.statusbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: var(--statusbar-h); padding: 0 12px; background: var(--bg);
+  border-top: 1px solid var(--border); font-size: 12px; }
+.statusbar .right { display: flex; gap: 14px; color: var(--muted); font-size: 11px; }
+#save-state.err { color: var(--danger); }
+
+/* ── 抽屉 ─────────────────────────── */
+.drawer { position: fixed; top: var(--topbar-h); right: 0; width: 420px; max-width: 92vw;
+  height: calc(100dvh - var(--topbar-h) - var(--statusbar-h)); background: var(--bg);
+  border-left: 1px solid var(--border); box-shadow: var(--shadow); z-index: 40;
+  transform: translateX(105%); transition: transform var(--ease); display: flex; flex-direction: column; }
+.drawer.open { transform: translateX(0); }
+.drawer.wide { width: min(880px, 94vw); }
+.drawer-head { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); align-items: center; }
+.drawer-head .title { font-weight: 600; font-size: 14px; flex: 1; }
+.agent-body { display: grid; grid-template-columns: 160px minmax(0,1fr) 200px; flex: 1; min-height: 0; }
+.agent-hist, .agent-obs { overflow: auto; padding: 8px; font-size: 13px; }
+.agent-hist { border-right: 1px solid var(--border); }
+.agent-obs { border-left: 1px solid var(--border); }
+.agent-hist h5, .agent-obs h5 { margin: 6px 4px; font-size: 12px; color: var(--muted); }
+.agent-main { display: flex; flex-direction: column; min-width: 0; }
+.msgs { flex: 1; overflow: auto; padding: 14px; }
+.msg { margin-bottom: 10px; font-size: 13px; line-height: 1.6; }
+.msg.user { background: var(--surface); padding: 8px 12px; border-radius: 8px; }
+.msg.assistant { white-space: pre-wrap; }
+.draft-bar { display: none; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border);
+  align-items: center; font-size: 12px; color: var(--success); flex-wrap: wrap; }
+.draft-bar.show { display: flex; }
+.agent-input { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); flex-direction: column; }
+.agent-input textarea { resize: vertical; width: 100%; }
+.agent-ops { display: flex; gap: 8px; }
+.settings-form { padding: 14px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.settings-form h3 { margin: 8px 0 0; font-size: 13px; }
+.settings-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.media-grid { flex: 1; overflow: auto; padding: 10px; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+.media-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 11px; }
+.media-card .thumb { height: 64px; background: var(--surface); display: flex; align-items: center;
+  justify-content: center; color: var(--muted); }
+.media-card .meta { padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.media-card .ops { display: flex; gap: 4px; }
+.media-card .ops button { padding: 0 6px; font-size: 11px; min-height: 0; flex: 1; }
+
+/* ── 遮罩 / 移动端 ─────────── */
+.dot { display:inline-block; width:7px; height:7px; border-radius:50%; background: var(--border); flex:none; }
+.dot.on { background: var(--success); }
+.settings-accordion { flex:1; overflow:auto; }
+.settings-section { border-bottom: 1px solid var(--border); }
+.settings-section > summary { display:flex; align-items:center; gap:8px; padding:13px 16px; cursor:pointer;
+  user-select:none; font-size:14px; font-weight:600; list-style:none; }
+.settings-section > summary::-webkit-details-marker { display:none; }
+.settings-section > summary::before { content:'▸'; color:var(--muted); font-size:11px; width:12px; }
+.settings-section[open] > summary::before { transform:rotate(90deg); }
+.settings-section > summary:hover { background:var(--surface); }
+.settings-section-title { flex:1; }
+.settings-section-body { padding:0 16px 14px; border-top:1px dashed var(--border); }
+.sider-backdrop { display: none; }
+.toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  background: var(--fg); color: var(--bg); padding: 8px 16px; border-radius: 8px;
+  font-size: 13px; opacity: 0; pointer-events: none; transition: opacity var(--ease); z-index: 60; }
+.toast.show { opacity: .92; }
+
+@media (max-width: 1100px) {
+  .topbar { grid-template-columns: auto 1fr auto; grid-template-rows: auto auto; }
+  .nav-tabs { order: 3; grid-column: 1 / -1; overflow-x: auto; }
+  .global-search { grid-column: 2; grid-row: 1; }
+  .doc-meta { display: none; }
+}
+@media (max-width: 860px) {
+  .workspace { grid-template-columns: minmax(0,1fr); }
+  .sider { position: absolute; inset: 0 auto 0 0; width: min(84vw, 300px); z-index: 30;
+    transform: translateX(-105%); transition: transform var(--ease); box-shadow: var(--shadow); }
+  body.sider-open .sider { transform: translateX(0); }
+  body.sider-collapsed .sider { transform: translateX(-105%); }
+  body.sider-collapsed .workspace { grid-template-columns: minmax(0,1fr); }
+  .sider-backdrop { display: block; position: absolute; inset: 0; background: var(--scrim);
+    z-index: 29; visibility: hidden; }
+  body.sider-open .sider-backdrop { visibility: visible; }
+  .global-search { display: none; }
+  body.view-split .workspace-main { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr) 0 minmax(0,1fr); }
+  body.view-split .split-handle { pointer-events: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body class="view-split">
+<div class="app">
+
+  <!-- ══ 顶栏 ══ -->
+  <header class="topbar">
+    <button class="icon-btn ghost" id="sider-toggle" title="侧边栏（Ctrl+B）">▤</button>
+    <div class="brand">PTDoc</div>
+    <div class="doc-meta">
+      <span class="doc-title">架构设计</span>
+      <span class="doc-source">磁盘实时</span>
+    </div>
+    <nav class="nav-tabs" role="tablist" aria-label="主导航">
+      <button type="button" role="tab" data-nav="docs" class="active" aria-selected="true">文档</button>
+      <button type="button" role="tab" data-nav="archive" aria-selected="false">归档</button>
+      <button type="button" role="tab" data-nav="agent" aria-selected="false">智能体</button>
+      <button type="button" role="tab" data-nav="share" aria-selected="false">分享</button>
+      <button type="button" role="tab" data-nav="settings" aria-selected="false">设置</button>
+    </nav>
+    <div class="global-search">
+      <input id="global-search" type="search" placeholder="搜索文档（Ctrl+K）…" autocomplete="off" />
+      <div class="global-search-pop" id="gs-pop"></div>
+    </div>
+    <div class="view-switch" role="tablist" aria-label="编辑视图">
+      <button data-view="edit" role="tab" aria-selected="false">编辑</button>
+      <button data-view="split" class="active" role="tab" aria-selected="true">分栏</button>
+      <button data-view="preview" role="tab" aria-selected="false">预览</button>
+    </div>
+    <div class="actions">
+      <button>打开</button>
+      <button>上传图片</button>
+      <button class="primary badge-btn" id="share-btn">生成分享版<span class="badge">3</span></button>
+      <button>更多 ▾</button>
+      <button class="ghost" id="theme-toggle" title="切换外观">◐</button>
+    </div>
+  </header>
+
+  <!-- ══ 工作区 ══ -->
+  <div class="workspace">
+    <div class="sider-backdrop" id="sider-backdrop"></div>
+
+    <aside class="sider">
+      <!-- 文档页 -->
+      <div class="sider-page active" data-page="docs">
+        <div class="sider-head">
+          <input type="search" placeholder="过滤文档…" />
+          <button class="icon-btn" title="新建文档">＋</button>
+          <button class="icon-btn" title="导入文件夹">📁</button>
+        </div>
+        <nav class="tree" id="docs-tree"></nav>
+      </div>
+
+      <!-- 归档页 -->
+      <div class="sider-page" data-page="archive">
+        <div class="sider-head">
+          <input type="search" placeholder="过滤归档…" />
+          <button class="icon-btn" title="新建文件夹">＋</button>
+        </div>
+        <nav class="tree" id="archive-tree"></nav>
+      </div>
+
+      <!-- 智能体页 -->
+      <div class="sider-page" data-page="agent">
+        <section class="nav-group">
+          <div class="nav-group-head"><span>智能体场景</span></div>
+          <nav class="nav-menu">
+            <button data-agent-scene="qa" class="active">知识库问答 <span class="nav-count">2</span></button>
+            <button data-agent-scene="writer">文档编写 <span class="nav-count">1</span></button>
+          </nav>
+        </section>
+        <section class="nav-group">
+          <div class="nav-group-head"><span>会话</span><button id="agent-new-nav">新对话</button></div>
+          <ul class="conv-list" id="nav-convs-proto"></ul>
+        </section>
+        <div class="sider-note">消息流与草稿操作在右侧工作区。</div>
+      </div>
+
+      <!-- 分享页 -->
+      <div class="sider-page" data-page="share">
+        <nav class="nav-menu">
+          <button id="media-btn">媒体库</button>
+        </nav>
+        <div class="sider-note">发布/分享操作在编辑器顶栏「生成分享版」；产物管理见「归档」页。</div>
+      </div>
+
+      <!-- 设置页 -->
+      <div class="sider-page" data-page="settings">
+        <nav class="nav-menu">
+          <button data-nav="settings" style="display:flex;align-items:center;gap:8px;width:100%">
+            <span style="flex:1;text-align:left">全部设置</span>
+            <span style="display:inline-flex;gap:4px">
+              <span class="dot on"></span><span class="dot on"></span><span class="dot"></span>
+            </span>
+          </button>
+        </nav>
+        <section class="nav-group">
+          <div class="nav-group-head"><span>配置项</span></div>
+          <nav class="nav-menu">
+            <button data-sec="storage" style="display:flex;align-items:center;gap:8px">对象存储 <span class="dot on"></span></button>
+            <button data-sec="llm" style="display:flex;align-items:center;gap:8px">大模型 <span class="dot on"></span></button>
+            <button data-sec="qdrant" style="display:flex;align-items:center;gap:8px">知识库 <span class="dot"></span></button>
+            <button data-sec="token" style="display:flex;align-items:center;gap:8px">API Token <span class="dot on"></span></button>
+          </nav>
+        </section>
+        <section class="nav-group">
+          <div class="nav-group-head"><span>账号</span></div>
+          <nav class="nav-menu">
+            <button data-sec="password">修改密码</button>
+            <button id="admin-btn">平台管理</button>
+          </nav>
+        </section>
+      </div>
+    </aside>
+
+    <div class="main-pages">
+      <!-- 文档工作台（文档/归档共用） -->
+      <section class="main-page active" data-main="docs">
+      <div class="workspace-main">
+      <section class="pane editor-pane">
+        <textarea id="proto-editor" spellcheck="false"># 架构设计
+
+## 概述
+
+这是 PTDoc 工作台原型。左侧是按领域划分的五页 Sider，
+顶栏 Tab 负责切换，试试点「归档」「智能体」「分享」「设置」。
+
+## 数据模型
+
+```mermaid
+graph TD
+  A[docs] --> B[shares]
+  A --> C[media]
+​```
+
+## 接口
+
+- GET /api/docs
+- POST /api/share
+</textarea>
+      </section>
+      <div class="split-handle" id="split-handle"></div>
+      <section class="pane preview-pane">
+        <h1>架构设计</h1>
+        <h2>概述</h2>
+        <p>这是 PTDoc 工作台原型。左侧是按领域划分的五页 Sider，顶栏 Tab 负责切换。试试切换顶部「编辑 / 分栏 / 预览」，拖动中间分隔条。</p>
+        <h2>数据模型</h2>
+        <div class="mermaid-mock">graph TD<br/>docs → shares / media<br/>（真实应用此处渲染为 SVG）</div>
+        <h2>接口</h2>
+        <ul><li>GET /api/docs</li><li>POST /api/share</li></ul>
+      </section>
+      </div>
+      </section>
+
+      <!-- 智能体主界面 -->
+      <section class="main-page" data-main="agent">
+        <div class="agent-page">
+          <div class="agent-tabs">
+            <button data-scene="qa" class="active">知识库问答</button>
+            <button data-scene="writer">文档编写</button>
+          </div>
+          <div class="agent-body">
+            <section class="agent-main">
+              <div class="msgs" id="agent-msgs-proto">
+                <div class="msg user">帮我给架构设计文档写一段引言</div>
+                <div class="msg assistant">好的，以下是基于当前文档内容生成的引言草稿……（流式输出演示）</div>
+              </div>
+              <div class="draft-bar show">✍ 草稿已生成 <button>写入当前文档</button><button>另存为新文档</button><button>取消</button></div>
+              <div class="agent-input">
+                <textarea rows="2" placeholder="输入问题或编写指令"></textarea>
+                <div class="agent-ops"><button class="primary">发送</button><button>停止</button><button>补充检索</button></div>
+              </div>
+            </section>
+            <aside class="agent-obs">
+              <h5>可观测</h5>
+              <div style="font-size:12px;color:var(--muted)">模型 deepseek-chat<br/>320 ms · token 1.2k/0.8k</div>
+              <h5>检索命中</h5>
+              <div style="font-size:12px">·架构设计.md（片段…）<br/>·接口文档.md（片段…）</div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- 分享主界面 -->
+      <section class="main-page" data-main="share">
+        <div class="share-page">
+          <header class="page-head">
+            <span class="page-title">分享记录</span>
+            <span class="page-hint">发布产物在「归档」页管理</span>
+            <button id="media-btn2">媒体库</button>
+          </header>
+          <ul class="list-plain share-list-main">
+            <li>notes/架构设计.md
+              <div class="m">已发布 · 3 天前</div>
+              <div class="ops"><button>HTML</button><button>MD</button><button>复制链接</button><button>删除</button></div>
+            </li>
+            <li>notes/接口文档.md
+              <div class="m">仅托管 · 刚刚</div>
+              <div class="ops"><button>HTML</button><button>MD</button><button>复制链接</button><button>删除</button></div>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 设置主界面 -->
+      <section class="main-page" data-main="settings">
+        <div class="settings-page">
+          <div class="settings-accordion" id="settings-proto"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ══ 状态栏 ══ -->
+  <footer class="statusbar">
+    <span id="status">就绪</span>
+    <span class="right"><span id="save-state">已保存 14:32</span><span>notes/架构设计.md</span></span>
+  </footer>
+</div>
+
+<!-- ══ 抽屉：媒体库 ══ -->
+<div class="drawer" id="media-drawer" role="dialog" aria-label="媒体库">
+  <div class="drawer-head">
+    <input type="search" placeholder="搜索文件名 / URL…" style="flex:1" />
+    <select><option>全部来源</option><option>直接上传</option><option>Mermaid</option></select>
+    <button data-close="media-drawer">✕</button>
+  </div>
+  <div class="media-grid">
+    <div class="media-card"><div class="thumb">🖼</div><div class="meta"><span>img-01.png</span><span style="color:var(--muted)">12k · 直接 · 3天前</span>
+      <div class="ops"><button>复制</button><button>插入</button><button>删除</button></div></div></div>
+    <div class="media-card"><div class="thumb">📊</div><div class="meta"><span>mermaid-a.png</span><span style="color:var(--muted)">48k · Mermaid · 3天前</span>
+      <div class="ops"><button>复制</button><button>插入</button><button>删除</button></div></div></div>
+    <div class="media-card"><div class="thumb">🖼</div><div class="meta"><span>img-02.png</span><span style="color:var(--muted)">9k · 直接 · 5天前</span>
+      <div class="ops"><button>复制</button><button>插入</button><button>删除</button></div></div></div>
+  </div>
+</div>
+
+<!-- ══ 抽屉：平台管理 ══ -->
+<div class="drawer" id="admin-drawer" role="dialog" aria-label="平台管理">
+  <div class="drawer-head"><span class="title">平台管理</span><button data-close="admin-drawer">✕</button></div>
+  <div style="display:flex;border-bottom:1px solid var(--border)">
+    <button class="ghost" style="flex:1;border-radius:0;border-bottom:2px solid var(--accent)">账号</button>
+    <button class="ghost" style="flex:1;border-radius:0">智能体扩展</button>
+  </div>
+  <ul class="list-plain">
+    <li>alice · 管理员
+      <div class="m">活跃 · 2026-01-12 创建</div>
+      <div class="ops"><button>改为成员</button><button>停用</button><button>重置密码</button></div>
+    </li>
+    <li>bob · 成员
+      <div class="m">活跃 · 2026-02-01 创建</div>
+      <div class="ops"><button>改为管理员</button><button>停用</button><button>重置密码</button></div>
+    </li>
+  </ul>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const toast = (msg) => {
+  const t = $('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 1800);
+};
+
+/* ── 假数据 ── */
+const docsTree = [
+  { f: 'notes', open: true, children: [
+    { f: '工作台', open: true, children: [
+      { d: '架构设计', cur: true }, { d: '接口文档' }, { d: '部署手册' },
+    ]},
+    { d: '需求描述' },
+  ]},
+  { d: 'README' },
+  { d: 'CHANGELOG' },
+];
+const archiveTree = [
+  { f: '发布产物', open: true, children: [
+    { d: '架构设计 v2', stale: true }, { d: '接口文档', ok: true },
+  ]},
+];
+const searchDocs = [
+  { t: '架构设计', m: 'notes/架构设计.md · 概述：这是 PTDoc…' },
+  { t: '接口文档', m: 'notes/接口文档.md · GET /api/docs…' },
+  { t: '部署手册', m: 'notes/工作台/部署手册.md · 2 小时前' },
+  { t: 'README', m: 'README.md · 3 天前' },
+];
+
+/* ── 树渲染 ── */
+function renderTree(el, nodes) {
+  const ul = document.createElement('ul');
+  for (const n of nodes) {
+    const li = document.createElement('li');
+    if (n.f) {
+      li.innerHTML = `<div class="tree-row"><span class="caret">${n.open ? '▾' : '▸'}</span>${n.f}</div>`;
+      const kids = document.createElement('ul');
+      kids.className = 'children';
+      if (!n.open) kids.style.display = 'none';
+      kids.appendChild(renderTreeInner(n.children));
+      li.appendChild(kids);
+      li.querySelector('.tree-row').addEventListener('click', () => {
+        n.open = !n.open;
+        kids.style.display = n.open ? '' : 'none';
+        li.querySelector('.caret').textContent = n.open ? '▾' : '▸';
+      });
+      ul.appendChild(li);
+    } else {
+      li.innerHTML = `<div class="tree-row${n.cur ? ' current' : ''}"><span class="caret">·</span>${n.d}` +
+        (n.stale ? '<span class="tag stale">待同步</span>' : '') +
+        (n.ok ? '<span class="tag ok">已同步</span>' : '') +
+        `<span class="ops"><button>✎</button><button>🗑</button></span></div>`;
+      li.querySelector('.tree-row').addEventListener('click', (e) => {
+        if (e.target.tagName === 'BUTTON') { toast('原型：操作演示'); return; }
+        el._root.querySelectorAll('.tree-row').forEach((r) => r.classList.remove('current'));
+        li.querySelector('.tree-row').classList.add('current');
+        $('status').textContent = '已打开（磁盘实时）：' + n.d;
+        if (innerWidth <= 860) closeSider();
+      });
+      ul.appendChild(li);
+    }
+  }
+  return ul;
+}
+function renderTreeInner(nodes) {
+  const wrap = document.createElement('div');
+  wrap.appendChild(renderTree(wrap, nodes));
+  return wrap.firstChild;
+}
+function mountTree(id, data) {
+  const el = $(id);
+  const root = renderTree(el, data);
+  el.innerHTML = ''; el.appendChild(root);
+  el._root = root;
+}
+mountTree('docs-tree', docsTree);
+mountTree('archive-tree', archiveTree);
+
+/* ── 一级导航 → Sider 分页 ── */
+function setNav(page) {
+  document.querySelectorAll('.nav-tabs button').forEach((b) => {
+    const on = b.dataset.nav === page;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on);
+  });
+  document.querySelectorAll('.sider-page').forEach((p) =>
+    p.classList.toggle('active', p.dataset.page === page));
+  document.querySelectorAll('.main-page').forEach((m) =>
+    m.classList.toggle('active', m.dataset.main === page || (page === 'archive' && m.dataset.main === 'docs')));
+  document.querySelector('.view-switch').style.visibility =
+    page === 'docs' || page === 'archive' ? '' : 'hidden';
+  if (page !== 'docs') openSider();
+  if (page === 'agent') paintNavConvs();
+  if (page === 'settings') buildSettings();
+}
+/* 智能体 Sider：场景 + 会话导航 */
+const convData = {
+  qa: ['报错怎么排查', '如何配置图床'],
+  writer: ['架构文章大纲 v2'],
+};
+let protoScene = 'qa';
+function paintNavConvs() {
+  const ul = document.getElementById('nav-convs-proto');
+  ul.innerHTML = '';
+  convData[protoScene].forEach((t) => {
+    const li = document.createElement('li');
+    li.textContent = t;
+    li.addEventListener('click', () => toast('打开会话：' + t));
+    ul.appendChild(li);
+  });
+}
+document.querySelectorAll('[data-agent-scene]').forEach((b) =>
+  b.addEventListener('click', () => {
+    protoScene = b.dataset.agentScene;
+    document.querySelectorAll('[data-agent-scene]').forEach((x) => x.classList.toggle('active', x === b));
+    paintNavConvs();
+  }));
+document.getElementById('agent-new-nav').addEventListener('click', () => {
+  convData[protoScene].push('新对话 ' + (convData[protoScene].length + 1));
+  paintNavConvs();
+  toast('已创建会话');
+});
+/* 设置主界面：手风琴（与真实代码同构） */
+let settingsBuilt = false;
+function buildSettings() {
+  if (settingsBuilt) return;
+  settingsBuilt = true;
+  const secs = [
+    ['storage', '对象存储（七牛云）', '当前配置已通过连通性校验'],
+    ['llm', '大模型（OpenAI 兼容）', '已保存'],
+    ['qdrant', '知识库（Qdrant）', '尚未配置'],
+    ['password', '修改密码', ''],
+    ['token', 'API Token', '已配置（填写新值即可轮换）'],
+  ];
+  const host = document.getElementById('settings-proto');
+  host.innerHTML = secs.map(([id, title, hint], i) => `
+    <details class="settings-section" ${i === 0 ? 'open' : ''}>
+      <summary><span class="settings-section-title">${title}</span><span class="dot ${['on','on','','','on'][i]}"></span></summary>
+      <div class="settings-section-body">
+        <form class="settings-form" onsubmit="return false">
+          ${hint ? `<p style="font-size:12px;color:var(--muted)">${hint}</p>` : ''}
+          <label>示例字段 A<input placeholder="…" /></label>
+          <label>示例字段 B<input placeholder="…" /></label>
+          <button type="button" class="primary">保存</button>
+        </form>
+      </div>
+    </details>`).join('');
+  host.querySelectorAll('.settings-section > summary').forEach((sum) =>
+    sum.addEventListener('click', () => {
+      const d = sum.parentElement;
+      const was = d.open;
+      host.querySelectorAll('.settings-section').forEach((x) => (x.open = false));
+      if (!was) d.open = true;
+    }));
+}
+document.querySelectorAll('.nav-tabs button').forEach((b) =>
+  b.addEventListener('click', () => setNav(b.dataset.nav)));
+
+/* ── 侧栏开合 ── */
+const isMobile = () => matchMedia('(max-width: 860px)').matches;
+function openSider() {
+  if (isMobile()) document.body.classList.add('sider-open');
+  document.body.classList.remove('sider-collapsed');
+}
+function closeSider() {
+  if (isMobile()) document.body.classList.remove('sider-open');
+  else document.body.classList.add('sider-collapsed');
+}
+$('sider-toggle').addEventListener('click', () => {
+  if (isMobile()) document.body.classList.toggle('sider-open');
+  else if (document.body.classList.contains('sider-collapsed')) document.body.classList.remove('sider-collapsed');
+  else closeSider();
+});
+$('sider-backdrop').addEventListener('click', () => document.body.classList.remove('sider-open'));
+
+/* ── 视图切换 ── */
+document.querySelectorAll('.view-switch button').forEach((b) =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.view-switch button').forEach((x) => {
+      x.classList.toggle('active', x === b);
+      x.setAttribute('aria-selected', x === b);
+    });
+    document.body.classList.remove('view-edit', 'view-split', 'view-preview');
+    document.body.classList.add('view-' + b.dataset.view);
+    if (b.dataset.view === 'split' && !isMobile()) setSplit(lastSplit ?? .5);
+    else $('split-handle').parentElement.style.gridTemplateColumns = '';
+  }));
+
+/* ── 分栏拖拽 ── */
+let lastSplit = null;
+function setSplit(ratio) {
+  lastSplit = Math.min(.72, Math.max(.28, ratio));
+  document.querySelector('.workspace-main').style.gridTemplateColumns =
+    lastSplit + 'fr 6px ' + (1 - lastSplit) + 'fr';
+}
+$('split-handle').addEventListener('pointerdown', (e) => {
+  if (isMobile()) return;
+  e.preventDefault();
+  document.body.classList.add('resizing');
+  const rect = e.currentTarget.parentElement.getBoundingClientRect();
+  const move = (ev) => setSplit((ev.clientX - rect.left) / rect.width);
+  const up = () => {
+    document.body.classList.remove('resizing');
+    removeEventListener('pointermove', move);
+    removeEventListener('pointerup', up);
+  };
+  addEventListener('pointermove', move);
+  addEventListener('pointerup', up);
+});
+
+/* ── 全局搜索 ── */
+function renderSearch(q) {
+  const pop = $('gs-pop');
+  const kw = q.trim().toLowerCase();
+  const hits = kw ? searchDocs.filter((d) => (d.t + d.m).toLowerCase().includes(kw)) : searchDocs;
+  pop.innerHTML = (kw ? '<div style="padding:6px 12px;font-size:11px;color:var(--muted)">全文搜索 · ' + hits.length + ' 条</div>'
+    : '<div style="padding:6px 12px;font-size:11px;color:var(--muted)">最近打开</div>') +
+    (hits.length ? '' : '<div class="gs-item"><div class="m">没有匹配的文档</div></div>');
+  hits.forEach((h) => {
+    const div = document.createElement('div');
+    div.className = 'gs-item';
+    div.innerHTML = `<div class="t">${h.t}</div><div class="m">${h.m}</div>`;
+    div.addEventListener('mousedown', () => {
+      $('gs-pop').classList.remove('open');
+      $('status').textContent = '已打开：' + h.t;
+      toast('打开文档：' + h.t);
+    });
+    pop.appendChild(div);
+  });
+  pop.classList.add('open');
+}
+const gsInput = $('global-search');
+gsInput.addEventListener('focus', () => renderSearch(gsInput.value));
+gsInput.addEventListener('input', () => renderSearch(gsInput.value));
+gsInput.addEventListener('blur', () => setTimeout(() => $('gs-pop').classList.remove('open'), 150));
+gsInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('gs-pop').classList.remove('open');
+});
+
+/* ── 抽屉 ── */
+const drawers = ['media-drawer', 'admin-drawer'];
+function openDrawer(id) {
+  drawers.forEach((d) => $(d).classList.toggle('open', d === id));
+}
+function closeDrawers() { drawers.forEach((d) => $(d).classList.remove('open')); }
+document.querySelectorAll('[data-close]').forEach((b) =>
+  b.addEventListener('click', () => $(b.dataset.close).classList.remove('open')));
+// 配置项直达：Sider 点哪个组 → 设置主界面只展开哪个分区
+document.querySelectorAll('[data-sec]').forEach((b) =>
+  b.addEventListener('click', () => {
+    buildSettings();
+    const host = document.getElementById('settings-proto');
+    host.querySelectorAll('.settings-section').forEach((d) => (d.open = false));
+    const map = { storage: 0, llm: 1, qdrant: 2, password: 3, token: 4 };
+    const target = host.children[map[b.dataset.sec]];
+    if (target) { target.open = true; target.scrollIntoView({ block: 'start' }); }
+  }));
+$('media-btn').addEventListener('click', () => openDrawer('media-drawer'));
+$('admin-btn').addEventListener('click', () => openDrawer('admin-drawer'));
+$('share-btn').addEventListener('click', () => {
+  toast('原型：生成分享版（真实应用先弹差异确认）');
+  $('share-btn').classList.remove('has-badge');
+  $('status').textContent = '已生成分享版（3 张图，.md 与 .html 已上传）';
+});
+
+/* ── 主题 ── */
+$('theme-toggle').addEventListener('click', () => {
+  const cur = document.documentElement.dataset.theme;
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('proto.theme', next);
+});
+
+/* ── 快捷键 ── */
+addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) {
+    e.preventDefault(); gsInput.focus(); gsInput.select();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+    e.preventDefault();
+    $('sider-toggle').click();
+  }
+  if (e.key === 'Escape') closeDrawers();
+});
+</script>
+</body>
+</html>
