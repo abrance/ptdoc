@@ -130,6 +130,11 @@ body.sider-collapsed .sider { overflow: hidden; border-right: 0; }
 .main-page { display:none; min-width:0; min-height:0; grid-area:1/1; }
 .main-page.active { display:block; }
 .main-page .workspace-main { height:100%; }
+.workspace-page { display:flex; flex-direction:column; height:100%; min-height:0; }
+.workspace-toolbar { display:flex; align-items:center; gap:12px; min-height:44px; padding:4px 12px;
+  background:var(--bg); border-bottom:1px solid var(--border); overflow-x:auto; scrollbar-width:none; }
+.workspace-toolbar::-webkit-scrollbar { display:none; }
+.workspace-main { flex:1; }
 .agent-page { display:flex; flex-direction:column; height:100%; min-height:0; background:var(--bg); }
 .agent-page .agent-tabs { display:flex; border-bottom:1px solid var(--border); }
 .agent-page .agent-tabs button { flex:0 0 auto; border:0; border-radius:0; background:transparent; padding:10px 18px; font-size:13px; }
@@ -273,16 +278,7 @@ body.view-preview .editor-pane, body.view-preview .split-handle { pointer-events
       <input id="global-search" type="search" placeholder="搜索文档（Ctrl+K）…" autocomplete="off" />
       <div class="global-search-pop" id="gs-pop"></div>
     </div>
-    <div class="view-switch" role="tablist" aria-label="编辑视图">
-      <button data-view="edit" role="tab" aria-selected="false">编辑</button>
-      <button data-view="split" class="active" role="tab" aria-selected="true">分栏</button>
-      <button data-view="preview" role="tab" aria-selected="false">预览</button>
-    </div>
-    <div class="actions">
-      <button>打开</button>
-      <button>上传图片</button>
-      <button class="primary badge-btn" id="share-btn">生成分享版<span class="badge">3</span></button>
-      <button>更多 ▾</button>
+    <div class="actions" style="gap:6px">
       <button class="ghost" id="theme-toggle" title="切换外观">◐</button>
     </div>
   </header>
@@ -367,6 +363,20 @@ body.view-preview .editor-pane, body.view-preview .split-handle { pointer-events
     <div class="main-pages">
       <!-- 文档工作台（文档/归档共用） -->
       <section class="main-page active" data-main="docs">
+      <div class="workspace-page">
+      <div class="workspace-toolbar">
+        <div class="view-switch" role="tablist" aria-label="编辑视图">
+          <button data-view="edit" role="tab" aria-selected="false">编辑</button>
+          <button data-view="split" class="active" role="tab" aria-selected="true">分栏</button>
+          <button data-view="preview" role="tab" aria-selected="false">预览</button>
+        </div>
+        <div class="actions" style="margin-left:auto">
+          <button>打开</button>
+          <button>上传图片</button>
+          <button class="primary badge-btn" id="share-btn">生成分享版<span class="badge">3</span></button>
+          <button>更多 ▾</button>
+        </div>
+      </div>
       <div class="workspace-main">
       <section class="pane editor-pane">
         <textarea id="proto-editor" spellcheck="false"># 架构设计
@@ -400,6 +410,7 @@ graph TD
         <h2>接口</h2>
         <ul><li>GET /api/docs</li><li>POST /api/share</li></ul>
       </section>
+      </div>
       </div>
       </section>
 
@@ -598,8 +609,8 @@ function setNav(page) {
     p.classList.toggle('active', p.dataset.page === page));
   document.querySelectorAll('.main-page').forEach((m) =>
     m.classList.toggle('active', m.dataset.main === page || (page === 'archive' && m.dataset.main === 'docs')));
-  document.querySelector('.view-switch').style.visibility =
-    page === 'docs' || page === 'archive' ? '' : 'hidden';
+  document.querySelector('.workspace-toolbar').style.display =
+    page === 'docs' || page === 'archive' ? '' : 'none';
   if (page !== 'docs') openSider();
   if (page === 'agent') paintNavConvs();
   if (page === 'settings') buildSettings();

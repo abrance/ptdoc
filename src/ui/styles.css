@@ -121,7 +121,7 @@ body {
 .topbar {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-3);
   min-height: var(--topbar-h);
@@ -129,6 +129,13 @@ body {
   background: var(--bg);
   border-bottom: 1px solid var(--border);
   z-index: var(--z-sticky);
+}
+
+/* 顶栏只剩全局层：Tab + 标题 + 搜索 + 账号。文档操作在工具条里 */
+.action-account {
+  gap: 6px;
+  display: flex;
+  align-items: center;
 }
 
 /* ─── Workbench 一级导航 Tab（顶部）── */
@@ -837,11 +844,46 @@ body.sidebar-collapsed .sidebar {
   border-right: 0;
 }
 
+/* ─── 文档工作台工具条（仅文档/归档页显示）── */
+.workspace-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: 4px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workspace-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-toolbar .actions {
+  justify-self: end;
+  margin-left: auto;
+}
+
+.workspace-toolbar .menu {
+  display: none;
+  position: relative;
+}
+
 .workspace-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 6px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  flex: 1;
 }
 
 /* ── 主界面分页（Workbench：每个一级 Tab 一页主界面）── */
@@ -1959,21 +2001,14 @@ body.toc-on .preview-pane {
 @media (max-width: 1100px) {
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-  }
-
-  .view-switch {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .actions {
-    grid-column: 1 / -1;
-    justify-self: stretch;
   }
 
   .doc-title {
     max-width: 140px;
+  }
+
+  .global-search {
+    width: min(200px, 26vw);
   }
 }
 
