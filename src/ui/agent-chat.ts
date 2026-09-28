@@ -14,73 +14,49 @@ interface Hit {
   score: number;
 }
 
+type AgentScene = 'qa' | 'writer';
+
 export function initAgentChat(opts: {
   onStatus: (msg: string, isError?: boolean) => void;
   getCurrentDocId: () => number | null;
   insertAtCursor: (text: string) => void;
   onDraftApplied?: (mode: 'replace-current' | 'create', docId: number | null) => void;
-}): { toggle: () => void } {
-  let drawer: HTMLElement | null = null;
-  let scene: 'qa' | 'writer' = 'qa';
+  /** 会话列表变化时刷新 Sider 导航（app.ts 提供实现） */
+  onConvsChanged?: () => void;
+}): {
+  setScene: (scene: AgentScene) => void;
+  openConv: (convId: number, scene: AgentScene) => void;
+  newConv: (scene: AgentScene) => Promise<void>;
+  refresh: () => Promise<void>;
+} {
+  let scene: AgentScene = 'qa';
   let convId: number | null = null;
   let streaming = false;
   let draft = '';
   let hits: Hit[] = [];
   let abortCtrl: AbortController | null = null;
 
-  const ensure = (): HTMLElement => {
-    if (drawer && document.body.contains(drawer)) return drawer;
-    drawer = document.createElement('div');
-    drawer.id = 'agent-drawer';
-    drawer.className = 'drawer agent-drawer';
-    drawer.innerHTML = `
-      <div class="drawer-head">
-        <span class="drawer-title">智能体</span>
-        <button id="agent-close" type="button">✕</button>
-      </div>
-      <div class="agent-tabs">
-        <button type="button" data-scene="qa" class="active">知识库问答</button>
-        <button type="button" data-scene="writer">文档编写</button>
-      </div>
-      <div class="agent-body">
-        <aside class="agent-hist">
-          <button type="button" id="agent-new">新对话</button>
-          <ul id="agent-convs"></ul>
-        </aside>
-        <section class="agent-main">
-          <div id="agent-msgs" class="agent-msgs"></div>
-          <div id="agent-draft" class="agent-draft" hidden>
-            <span>草稿已生成</span>
-            <button type="button" id="draft-current">写入当前文档</button>
-            <button type="button" id="draft-new">另存为新文档</button>
-            <button type="button" id="draft-cancel">取消</button>
-          </div>
-          <div class="agent-input">
-            <textarea id="agent-text" rows="3" placeholder="输入问题或编写指令"></textarea>
-            <div class="agent-ops">
-              <button type="button" id="agent-send">发送</button>
-              <button type="button" id="agent-stop">停止</button>
-              <button type="button" id="agent-retrieve" hidden>补充检索</button>
-            </div>
-          </div>
-        </section>
-        <aside class="agent-obs">
-          <h4>可观测</h4>
-          <div id="agent-obs"></div>
-        </aside>
-      </div>`;
-    document.body.appendChild(drawer);
-    document.getElementById('agent-close')!.onclick = () => drawer!.classList.remove('open');
-    drawer.querySelectorAll('.agent-tabs button').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        scene = (btn as HTMLElement).dataset.scene as 'qa' | 'writer';
-        drawer!.querySelectorAll('.agent-tabs button').forEach((b) => b.classList.toggle('active', b === btn));
-        document.getElementById('agent-retrieve')!.hidden = scene !== 'writer';
-        convId = null;
-        void refresh();
-      });
+  // ─── 场景 Tab（主界面顶部）──────────────────────────
+  const setScene = (next: AgentScene): void => {
+    scene = next;
+    document.querySelectorAll('.agent-tabs button').forEach((b) => {
+      const on = (b as HTMLElement).dataset.scene === next;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', String(on));
     });
-    document.getElementById('agent-new')!.onclick = () => void newConv();
+    document.getElementById('agent-retrieve')!.hidden = scene !== 'writer';
+    convId = null;
+    void refresh();
+    opts.onConvsChanged?.();
+  };
+
+  const bindOnce = new WeakSet<HTMLElement>();
+  const bindPage = (): void => {
+    document.querySelectorAll<HTMLButtonElement>('.agent-tabs button').forEach((btn) => {
+      if (bindOnce.has(btn)) return;
+      bindOnce.add(btn);
+      btn.addEventListener('click', () => setScene(btn.dataset.scene as AgentScene));
+    });
     document.getElementById('agent-send')!.onclick = () => void send();
     document.getElementById('agent-stop')!.onclick = () => void stop();
     document.getElementById('agent-retrieve')!.onclick = () => void retrieve();
@@ -90,27 +66,6 @@ export function initAgentChat(opts: {
       draft = '';
       document.getElementById('agent-draft')!.hidden = true;
     };
-    document.getElementById('agent-convs')!.addEventListener('click', async (e) => {
-      const li = (e.target as HTMLElement).closest<HTMLElement>('li[data-id]');
-      const del = (e.target as HTMLElement).closest<HTMLElement>('button[data-del]');
-      if (del && li) {
-        const ok = await askConfirm('对话记录会被删除，已写入文档的内容不受影响。', {
-          title: '删除该对话？',
-          confirmLabel: '删除',
-          danger: true,
-        });
-        if (!ok) return;
-        void fetch('/api/agents/conversations/' + li.dataset.id, { method: 'DELETE' }).then(() => {
-          if (String(convId) === li.dataset.id) convId = null;
-          void refresh();
-        });
-        return;
-      }
-      if (li) {
-        convId = Number(li.dataset.id);
-        void loadConv();
-      }
-    });
     document.getElementById('agent-msgs')!.addEventListener('click', (e) => {
       const t = e.target as HTMLElement;
       if (t.dataset.handoff) void handoff(Number(t.dataset.handoff));
@@ -125,9 +80,9 @@ export function initAgentChat(opts: {
       const hit = hits[Number(t.dataset.cite)];
       if (hit) opts.insertAtCursor(`\n> ${hit.title}\n>\n> ${hit.snippet}\n\n`);
     });
-    return drawer;
   };
 
+  // ─── 可观测面板 ────────────────────────────────────
   const renderObs = (trace?: { model?: string; latency_ms?: number; input_tokens?: number; output_tokens?: number; hits?: Hit[]; spans?: Array<{ name: string; ms: number }> }): void => {
     const el = document.getElementById('agent-obs')!;
     const h = trace?.hits || hits;
@@ -146,19 +101,16 @@ export function initAgentChat(opts: {
       (trace?.spans || []).map((s) => `<div>${s.name} · ${s.ms}ms</div>`).join('');
   };
 
+  // ─── 会话加载 / 新建 ───────────────────────────────
   const refresh = async (): Promise<void> => {
-    const res = await fetch('/api/agents/conversations?scene=' + scene);
-    const rows = (await res.json()) as Conv[];
-    const ul = document.getElementById('agent-convs')!;
-    ul.innerHTML = rows
-      .map(
-        (c) =>
-          `<li data-id="${c.id}" class="${c.id === convId ? 'on' : ''}"><span>${c.title || '未命名'}</span><button type="button" data-del="1">删</button></li>`,
-      )
-      .join('');
-    if (!convId && rows[0]) convId = rows[0].id;
-    if (convId) await loadConv();
-    else document.getElementById('agent-msgs')!.innerHTML = '';
+    bindPage();
+    if (convId == null) {
+      document.getElementById('agent-msgs')!.innerHTML =
+        '<div class="agent-empty">从左侧选择会话，或点「新对话」开始</div>';
+      renderObs();
+      return;
+    }
+    await loadConv();
   };
 
   const newConv = async (): Promise<void> => {
@@ -171,10 +123,11 @@ export function initAgentChat(opts: {
     if (!res.ok) return opts.onStatus(j.error || '失败', true);
     convId = j.id;
     await refresh();
+    opts.onConvsChanged?.();
   };
 
   const loadConv = async (): Promise<void> => {
-    if (!convId) return;
+    if (convId == null) return;
     const res = await fetch('/api/agents/conversations/' + convId);
     const j = (await res.json()) as { turns: Array<{ id: number; role: string; content: string; draft_md?: string }> };
     const box = document.getElementById('agent-msgs')!;
@@ -199,6 +152,7 @@ export function initAgentChat(opts: {
     } else renderObs();
   };
 
+  // ─── 发送（SSE 流式）──────────────────────────────
   const send = async (): Promise<void> => {
     if (!convId) await newConv();
     if (!convId || streaming) return;
@@ -295,13 +249,8 @@ export function initAgentChat(opts: {
     });
     const j = (await res.json()) as { writer_conversation_id?: number; error?: string };
     if (!res.ok) return opts.onStatus(j.error || '交接失败', true);
-    scene = 'writer';
     convId = j.writer_conversation_id!;
-    drawer!.querySelectorAll('.agent-tabs button').forEach((b) =>
-      b.classList.toggle('active', (b as HTMLElement).dataset.scene === 'writer'),
-    );
-    document.getElementById('agent-retrieve')!.hidden = false;
-    await refresh();
+    setScene('writer');
   };
 
   const applyDraft = async (mode: 'replace-current' | 'create'): Promise<void> => {
@@ -349,11 +298,17 @@ export function initAgentChat(opts: {
   };
 
   return {
-    toggle: () => {
-      const d = ensure();
-      d.classList.toggle('open');
-      if (d.classList.contains('open')) void refresh();
+    setScene,
+    // Sider 会话导航回调：打开指定会话
+    openConv: (id: number, s: AgentScene) => {
+      scene = s;
+      convId = id;
+      setScene(s);
+      convId = id;
+      void refresh();
     },
+    newConv,
+    refresh,
   };
 }
 
