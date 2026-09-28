@@ -1,6 +1,17 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import {
+  Type,
+  createModels,
+  createProvider,
+  type Context,
+  type Message,
+  type Model,
+  type Tool as PiTool,
+  type ToolCall,
+} from '@earendil-works/pi-ai';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { decryptSecret } from './storage.ts';
 import { getDoc, getLlmProfile, getQdrantProfile, listAllDocs } from './db.ts';
 import { retrieveHits, type RetrievedHit } from './qdrant-retriever.ts';
@@ -125,183 +136,162 @@ async function executeTool(
   }
 }
 
-function openaiTools(scene: 'qa' | 'writer'): unknown[] {
-  const tools: unknown[] = [];
+/** 场景工具定义（TypeBox schema，由 pi-ai 转换成各 provider 的 wire 格式） */
+function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
   if (scene === 'qa') {
-    tools.push({
-      type: 'function',
-      function: {
+    return [
+      {
         name: 'search_knowledge',
         description: '在远程 Qdrant 知识库中检索相关文档片段',
-        parameters: {
-          type: 'object',
-          properties: { query: { type: 'string' } },
-          required: ['query'],
-        },
+        parameters: Type.Object({ query: Type.String({ description: '检索查询词' }) }),
       },
-    });
-  } else {
-    tools.push(
-      {
-        type: 'function',
-        function: {
-          name: 'list_workspace_docs',
-          description: '列出当前用户工作区文档',
-          parameters: { type: 'object', properties: {} },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'read_workspace_doc',
-          description: '读取一篇工作区文档全文',
-          parameters: {
-            type: 'object',
-            properties: { doc_id: { type: 'number' } },
-            required: ['doc_id'],
-          },
-        },
-      },
-    );
+    ];
   }
-  return tools;
+  return [
+    {
+      name: 'list_workspace_docs',
+      description: '列出当前用户工作区文档',
+      parameters: Type.Object({}),
+    },
+    {
+      name: 'read_workspace_doc',
+      description: '读取一篇工作区文档全文',
+      parameters: Type.Object({ doc_id: Type.Number({ description: '文档 id' }) }),
+    },
+  ];
 }
 
-function joinUrl(base: string, path: string): string {
+/** 用户 LLM 设置 → pi-ai OpenAI 兼容 provider（每次运行重建，读库解密最新配置） */
+function buildModels(userId: number): { models: ReturnType<typeof createModels>; model: Model<'openai-completions'> } | null {
+  const llm = getLlmProfile(userId);
+  if (!llm) return null;
+  const apiKey = decryptSecret(llm.api_key_enc);
+  const model: Model<'openai-completions'> = {
+    id: llm.model,
+    name: llm.model,
+    api: 'openai-completions',
+    provider: 'ptdoc-llm',
+    baseUrl: joinUrl(llm.base_url, ''),
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 32000,
+  };
+  const provider = createProvider({
+    id: 'ptdoc-llm',
+    name: 'PTDoc LLM',
+    baseUrl: joinUrl(llm.base_url, ''),
+    auth: {
+      apiKey: {
+        name: 'PTDoc 大模型 API Key',
+        resolve: async () => ({ auth: { apiKey } }),
+      },
+    },
+    models: [model],
+    api: openAICompletionsApi(),
+  });
+  const models = createModels();
+  models.setProvider(provider);
+  return { models, model };
+}
+
+function joinUrl(base: string, _path: string): string {
   const b = base.replace(/\/$/, '');
-  if (b.endsWith('/v1')) return b + path;
-  return b + '/v1' + path;
+  return b.endsWith('/v1') ? b : b + '/v1';
+}
+
+/** 外部历史消息 → pi-ai 消息（历史里没有工具调用记录，工具轮消息只在本次会话内产生） */
+function toPiMessages(input: ChatRunInput): Message[] {
+  const out: Message[] = [];
+  for (const m of input.messages) {
+    if (m.role === 'system') continue; // system 由 Context.systemPrompt 承载
+    out.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+      timestamp: Date.now(),
+    } as Message);
+  }
+  out.push({ role: 'user', content: input.input, timestamp: Date.now() } as Message);
+  return out;
 }
 
 async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, ChatRunResult> {
-  const llm = getLlmProfile(input.userId);
-  if (!llm) {
+  const built = buildModels(input.userId);
+  if (!built) {
     yield { type: 'error', errorText: '请先在设置中填写大模型 Base URL、API Key 与模型名' };
-    return {
-      text: '',
-      hits: [],
-      spans: [],
-      model: '',
-      inputTokens: 0,
-      outputTokens: 0,
-    };
+    return { text: '', hits: [], spans: [], model: '', inputTokens: 0, outputTokens: 0 };
   }
-  const apiKey = decryptSecret(llm.api_key_enc);
+  const { models, model } = built;
   const skills = readSkillInstructions();
   let currentDoc = '';
   if (input.docId) {
     const d = getDoc(input.userId, input.docId);
     if (d) currentDoc = `# ${d.title}\n\n${d.content}`;
   }
-  const system =
-    input.scene === 'qa' ? qaInstructions(skills) : writerInstructions(skills, currentDoc);
-  const messages: Array<Record<string, unknown>> = [
-    { role: 'system', content: system },
-    ...input.messages.map((m) => ({ role: m.role, content: m.content })),
-    { role: 'user', content: input.input },
-  ];
+  const context: Context = {
+    systemPrompt:
+      input.scene === 'qa' ? qaInstructions(skills) : writerInstructions(skills, currentDoc),
+    messages: toPiMessages(input),
+    tools: sceneTools(input.scene),
+  };
   const hits: RetrievedHit[] = [];
   const spans: ChatRunResult['spans'] = [];
   let text = '';
   let inputTokens = 0;
   let outputTokens = 0;
-  const tools = openaiTools(input.scene);
   // plugin tools are executed only if they expose name+execute; otherwise ignored in this loop
   await loadPluginTools();
   void mcpServerConfigs();
 
   for (let round = 0; round < 6; round++) {
     if (input.abort.aborted) break;
-    const res = await fetch(joinUrl(llm.base_url, '/chat/completions'), {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: llm.model,
-        messages,
-        stream: true,
-        tools: tools.length ? tools : undefined,
-      }),
-      signal: input.abort,
-    });
-    if (!res.ok) {
-      const err = (await res.text()).slice(0, 200) || '大模型请求失败';
-      yield { type: 'error', errorText: err };
-      return { text, hits, spans, model: llm.model, inputTokens, outputTokens };
+    let assistant;
+    try {
+      assistant = await models.complete(model, context, { signal: input.abort });
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') break;
+      yield { type: 'error', errorText: ((e as Error).message || '大模型请求失败').slice(0, 200) };
+      return { text, hits, spans, model: model.id, inputTokens, outputTokens };
     }
-    const reader = res.body?.getReader();
-    if (!reader) {
-      yield { type: 'error', errorText: '大模型无流式响应' };
-      return { text, hits, spans, model: llm.model, inputTokens, outputTokens };
+    inputTokens = assistant.usage.input || inputTokens;
+    outputTokens = assistant.usage.output || outputTokens;
+    for (const part of assistant.content) {
+      if (part.type === 'text') {
+        // 流式逐段补发（complete 一次性返回，这里按段发 delta 事件保持前端协议不变）
+        text += part.text;
+        yield { type: 'text-delta', delta: part.text };
+      }
     }
-    const dec = new TextDecoder();
-    let buf = '';
-    let toolCallId = '';
-    let toolName = '';
-    let toolArgs = '';
-    let finish: string | null = null;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const data = s.slice(5).trim();
-        if (data === '[DONE]') continue;
-        let json: any;
+    const calls = assistant.content.filter((c): c is ToolCall => c.type === 'toolCall');
+    if (assistant.stopReason === 'toolUse' && calls.length > 0) {
+      context.messages.push(assistant);
+      for (const call of calls) {
+        yield { type: 'tool-call', toolName: call.name };
+        let args: Record<string, unknown> = {};
         try {
-          json = JSON.parse(data);
+          args = (call.arguments || {}) as Record<string, unknown>;
         } catch {
-          continue;
+          args = {};
         }
-        const choice = json.choices?.[0];
-        const usage = json.usage;
-        if (usage) {
-          inputTokens = usage.prompt_tokens || inputTokens;
-          outputTokens = usage.completion_tokens || outputTokens;
-        }
-        const delta = choice?.delta || {};
-        if (delta.content) {
-          text += delta.content;
-          yield { type: 'text-delta', delta: delta.content };
-        }
-        const tc = delta.tool_calls?.[0];
-        if (tc) {
-          if (tc.id) toolCallId = tc.id;
-          if (tc.function?.name) toolName = tc.function.name;
-          if (tc.function?.arguments) toolArgs += tc.function.arguments;
-        }
-        if (choice?.finish_reason) finish = choice.finish_reason;
+        const out = await executeTool(input.userId, input.scene, call.name, args, hits, spans);
+        yield { type: 'tool-result', toolName: call.name, result: out.slice(0, 2000) };
+        context.messages.push({
+          role: 'toolResult',
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [{ type: 'text', text: out }],
+          isError: false,
+          timestamp: Date.now(),
+        } as Message);
       }
-    }
-    if (finish === 'tool_calls' && toolName) {
-      yield { type: 'tool-call', toolName };
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(toolArgs || '{}');
-      } catch {
-        args = {};
-      }
-      const out = await executeTool(input.userId, input.scene, toolName, args, hits, spans);
-      yield { type: 'tool-result', toolName, result: out.slice(0, 2000) };
-      messages.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: [{ id: toolCallId || 'call_1', type: 'function', function: { name: toolName, arguments: toolArgs } }],
-      });
-      messages.push({ role: 'tool', tool_call_id: toolCallId || 'call_1', content: out });
       continue;
     }
     break;
   }
   const draft = input.scene === 'writer' ? extractDraft(text) : undefined;
   if (draft) yield { type: 'data-draft', data: { content: draft } };
-  return { text, draft, hits, spans, model: llm.model, inputTokens, outputTokens };
+  return { text, draft, hits, spans, model: model.id, inputTokens, outputTokens };
 }
 
 export async function* runChat(input: ChatRunInput): AsyncGenerator<StreamEvent, ChatRunResult> {
