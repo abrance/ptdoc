@@ -221,16 +221,28 @@ function joinUrl(base: string, _path: string): string {
   return b.endsWith('/v1') ? b : b + '/v1';
 }
 
-/** 外部历史消息 → pi-ai 消息（历史里没有工具调用记录，工具轮消息只在本次会话内产生） */
+/** 外部历史消息 → pi-ai 消息。
+ *  注意：AssistantMessage.content 必须是 block 数组（pi-ai transformMessages 会调 content.flatMap），
+ *  传纯字符串会在第二轮起抛 "content.flatMap is not a function"。历史回复转成单 text block，
+ *  并补齐 provider/api/stopReason 等必需字段（isSameModel 判断用，历史非同源则 thinking 块降级为纯文本——这里本来就只有 text）。 */
 function toPiMessages(input: ChatRunInput): Message[] {
   const out: Message[] = [];
   for (const m of input.messages) {
-    if (m.role === 'system') continue; // system 由 Context.systemPrompt 承载
-    out.push({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content,
-      timestamp: Date.now(),
-    } as Message);
+    if (m.role === 'system') continue; // system 由 systemPrompt 承载
+    if (m.role === 'assistant') {
+      out.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: m.content }],
+        api: 'openai-completions',
+        provider: 'ptdoc-llm',
+        model: 'history',
+        stopReason: 'stop',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        timestamp: Date.now(),
+      } as unknown as Message);
+    } else {
+      out.push({ role: 'user', content: m.content, timestamp: Date.now() } as Message);
+    }
   }
   out.push({ role: 'user', content: input.input, timestamp: Date.now() } as Message);
   return out;
