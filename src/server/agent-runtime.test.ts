@@ -90,7 +90,12 @@ test('extractDraft：提取 markdown 围栏草稿', () => {
 import { createServer, type Server } from 'node:http';
 
 let mockServer: Server | null = null;
-let mockResponses: Array<Array<Record<string, unknown>>> = []; // 每轮一组 SSE 帧
+let mockResponses: Array<Array<Record<string, unknown>>> = []; // 每轮一组 SSE 帧（简单顺序模式）
+// 并发模式（子代理测试）：按请求特征路由——主请求/子代理各自按到达顺序取帧
+let mockMainResponses: Array<Array<Record<string, unknown>>> = [];
+let mockSubResponses: Array<Array<Record<string, unknown>>> = [];
+let mainCount = 0;
+let subCount = 0;
 const seenRequests: any[] = [];
 
 function startMock(): Promise<number> {
@@ -99,16 +104,27 @@ function startMock(): Promise<number> {
       let body = '';
       req.on('data', (c) => (body += c));
       req.on('end', () => {
-        const idx = seenRequests.push(JSON.parse(body || '{}')) - 1;
+        const parsed = JSON.parse(body || '{}');
+        const idx = seenRequests.push(parsed) - 1;
+        if (process.env.DBG_MOCK) {
+          console.error(`[req ${idx}] tools=${(parsed.tools || []).map((t: any) => t.function?.name).join(',')} msgs=${(parsed.messages || []).map((m: any) => m.role + ':' + JSON.stringify(m.content).slice(0, 60)).join(' | ')}`);
+        }
         res.setHeader('Content-Type', 'text/event-stream');
-        // 按请求序号发对应轮次的响应（每轮一组帧）
-        for (const resp of mockResponses[idx] ?? []) {
+        // 按请求特征路由（并发安全）：主请求 = 工具面含 subagent_spawn；子代理 = 只有业务工具
+        const isMain = (parsed.tools || []).some((t: any) => t.function?.name === 'subagent_spawn');
+        // 双泳道模式仅用于子代理测试（mockMainResponses 非空）；否则全部请求走 mockResponses 顺序模式
+        const useLanes = mockMainResponses.length > 0;
+        const lanes = !useLanes ? mockResponses : isMain ? mockMainResponses : mockSubResponses;
+        const laneIdx = !useLanes ? idx : isMain ? mainCount++ : subCount++;
+        for (const resp of lanes[laneIdx] ?? []) {
           res.write('data: ' + JSON.stringify(resp) + '\n\n');
         }
         res.write('data: [DONE]\n\n');
         res.end();
       });
     });
+    mainCount = 0;
+    subCount = 0;
     mockServer.listen(0, '127.0.0.1', () => resolve((mockServer!.address() as any).port as number));
   });
 }
@@ -245,6 +261,115 @@ test('steer：工具间隙注入追问到 pi-ai 消息流（FR-10）', async () 
     // 第 2 轮请求应包含注入的 user 消息
     const secondRound = seenRequests[1].messages;
     assert.ok(secondRound.some((m: any) => m.role === 'user' && JSON.stringify(m.content).includes('架构图')));
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+test('子代理：spawn→并行检索→wait_all→汇总 全链路（FR-13）', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'high');
+  // 主泳道：第1轮 spawn×2 → 第2轮 wait_all → 第3轮汇总；子泳道：A=工具轮+文本轮，B=直接文本
+  mockMainResponses = [
+    [toolFrame('subagent_spawn', '{"task":"检索架构资料"}', 'call_s1'), toolFrame('subagent_spawn', '{"task":"检索部署资料"}', 'call_s2')],
+    [toolFrame('subagent_wait_all', '{}', 'call_w1')],
+    [textFrame('汇总：架构+部署完成', 'stop', { prompt_tokens: 20, completion_tokens: 8 })],
+  ];
+  mockSubResponses = [
+    [toolFrame('search_knowledge', '{"query":"架构"}', 'call_sa1')],
+    [textFrame('架构结果：单体应用', 'stop', { prompt_tokens: 5, completion_tokens: 3 })],
+    [textFrame('部署结果：docker', 'stop', { prompt_tokens: 4, completion_tokens: 2 })],
+  ];
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: '并行调研架构和部署', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+      events.push(r.value);
+    }
+    // spawn 事件 × 2
+    const spawns = events.filter((e) => e.type === 'subagent-spawn');
+    assert.equal(spawns.length, 2, '应有两个 subagent-spawn 事件，实际 ' + spawns.length);
+    // 主会话请求应带 subagent 工具声明
+    assert.ok(seenRequests[0].tools?.some((t: any) => t.function?.name === 'subagent_spawn'));
+    assert.ok(seenRequests[0].tools?.some((t: any) => t.function?.name === 'subagent_wait_all'));
+    // 子代理请求不应带 subagent 工具（无嵌套）；主请求 tools 含 subagent_* 但历史非空或有 spawn 记录
+    const subReqs = seenRequests.filter(
+      (r: any) => r.tools?.some((t: any) => t.function?.name === 'search_knowledge') && !r.tools?.some((t: any) => t.function?.name?.startsWith('subagent_')),
+    );
+    assert.ok(subReqs.length >= 2, '应有子代理独立请求，实际 ' + subReqs.length);
+    for (const sr of subReqs) {
+      assert.ok(!sr.tools?.some((t: any) => t.function?.name?.startsWith('subagent_')), '子代理工具面不应含 subagent_*');
+    }
+    // 子代理确实调用了 search_knowledge（工具循环生效）：子代理首轮请求 = 工具面仅 search_knowledge 且无 tool/assistant 历史
+    assert.ok(
+      seenRequests.some(
+        (r: any) =>
+          r.tools?.length === 1 &&
+          r.tools[0].function?.name === 'search_knowledge' &&
+          !r.messages?.some((m: any) => m.role === 'tool' || m.role === 'assistant'),
+      ),
+    );
+    // wait_all 结果回传给模型（第3轮请求含 wait_all 的 toolResult）
+    const finalReq = seenRequests[seenRequests.length - 1];
+    assert.ok(
+      finalReq.messages.some((m: any) => m.role === 'tool' && JSON.stringify(m.content).includes('架构结果')),
+      '汇总轮应收到子代理结果',
+    );
+    // 结果事件 × 2
+    const updates = events.filter((e) => e.type === 'subagent-update');
+    assert.equal(updates.length, 2, '应有两个 subagent-update 事件');
+    assert.ok(updates.every((e) => (e.data as any).status === 'done'));
+    // spans 含 subagent 标记
+    assert.ok(result!.spans.some((s) => s.name.startsWith('subagent:')));
+    assert.equal(result!.text, '汇总：架构+部署完成');
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+test('子代理：上限 3，第 4 个 spawn 被拒（FR-13）', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  // 主泳道：第1轮 spawn×4（第4个被拒）→ 第2轮 wait_all → 第3轮完成；子泳道：3 个子代理各一轮文本
+  mockMainResponses = [
+    [
+      toolFrame('subagent_spawn', '{"task":"A"}', 'c1'),
+      toolFrame('subagent_spawn', '{"task":"B"}', 'c2'),
+      toolFrame('subagent_spawn', '{"task":"C"}', 'c3'),
+      toolFrame('subagent_spawn', '{"task":"D"}', 'c4'),
+    ],
+    [toolFrame('subagent_wait_all', '{}', 'c5')],
+    [textFrame('完成', 'stop')],
+  ];
+  mockSubResponses = [[textFrame('A 结果', 'stop')], [textFrame('B 结果', 'stop')], [textFrame('C 结果', 'stop')]];
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: 'test', abort: new AbortController().signal });
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) break;
+      events.push(r.value);
+    }
+    const spawns = events.filter((e) => e.type === 'subagent-spawn');
+    assert.equal(spawns.length, 3, '只有 3 个成功 spawn');
+    const results = events.filter((e) => e.type === 'tool-result' && String(e.result || '').includes('上限'));
+    assert.equal(results.length, 1, '第 4 个 spawn 返回上限提示');
   } finally {
     mockServer?.close();
     mockServer = null;

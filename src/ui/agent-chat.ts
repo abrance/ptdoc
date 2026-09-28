@@ -37,6 +37,8 @@ export function initAgentChat(opts: {
   let abortCtrl: AbortController | null = null;
   /** steer 队列：流式期间发出的追问（FR-10） */
   const steerQueue: string[] = [];
+  /** 子代理卡片状态（FR-13）：id → {task,status,result,error} */
+  const subCards = new Map<string, { task: string; status: string; result?: string; error?: string }>();
 
   // ─── 场景 Tab（主界面顶部）──────────────────────────
   const setScene = (next: AgentScene): void => {
@@ -142,6 +144,30 @@ export function initAgentChat(opts: {
     return `<details class="think${live ? ' open' : ''}"${live ? ' open' : ''}><summary class="think-head">已思考${secs}</summary><pre>${escapeHtml(thinking)}</pre></details>`;
   };
 
+  /** 子代理卡片容器（FR-13）：消息流底部的运行区 */
+  const renderSubCards = (): void => {
+    const box = document.getElementById('agent-msgs')!;
+    let el = document.getElementById('agent-subcards') as HTMLElement | null;
+    if (!subCards.size) {
+      el?.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'agent-subcards';
+      box.appendChild(el);
+    }
+    el.innerHTML =
+      '<h5 class="subcards-title">子代理</h5>' +
+      [...subCards.entries()]
+        .map(
+          ([id, s]) =>
+            `<details class="subcard ${s.status}" data-subid="${id}"><summary>${s.status === 'running' ? '⏳' : s.error ? '✗' : '✓'} ${escapeHtml(s.task.slice(0, 40))}</summary><pre>${escapeHtml(s.error || s.result || '')}</pre></details>`,
+        )
+        .join('');
+    box.scrollTop = box.scrollHeight;
+  };
+
   // ─── 可观测面板 ────────────────────────────────────
   const renderObs = (trace?: { model?: string; latency_ms?: number; input_tokens?: number; output_tokens?: number; hits?: Hit[]; spans?: Array<{ name: string; ms: number }> }): void => {
     const el = document.getElementById('agent-obs')!;
@@ -164,6 +190,8 @@ export function initAgentChat(opts: {
   // ─── 会话加载 / 新建 ───────────────────────────────
   const refresh = async (): Promise<void> => {
     bindPage();
+    subCards.clear();
+    renderSubCards();
     if (convId == null) {
       document.getElementById('agent-msgs')!.innerHTML =
         '<div class="agent-empty">从左侧选择会话，或点「新对话」开始</div>';
@@ -317,6 +345,17 @@ export function initAgentChat(opts: {
           if (ev.type === 'data-draft') {
             draft = ev.data?.content || '';
             document.getElementById('agent-draft')!.hidden = !draft;
+          }
+          if (ev.type === 'subagent-spawn') {
+            const d = ev.data || {};
+            subCards.set(d.id, { task: d.task || '', status: 'running' });
+            renderSubCards();
+          }
+          if (ev.type === 'subagent-update') {
+            const d = ev.data || {};
+            const prev = subCards.get(d.id);
+            subCards.set(d.id, { task: d.task || prev?.task || '', status: d.status || 'done', result: d.result, error: d.error });
+            renderSubCards();
           }
           if (ev.type === 'error') opts.onStatus(ev.errorText || '生成失败', true);
           if (ev.type === 'data-done') {

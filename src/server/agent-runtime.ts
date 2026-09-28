@@ -77,6 +77,7 @@ function qaInstructions(skills: string): string {
     '你是 PTDoc 知识库问答助手。优先用 search_knowledge 检索后再回答。',
     '引用检索片段，不要编造来源。未命中时明确说明。',
     '回答正文中在引用检索片段处标注角标 [1] [2]（编号对应检索返回顺序），便于溯源。',
+    '需要多角度并行检索时，可用 subagent_spawn 派发子任务（上限 3），完成后 subagent_wait_all 汇总结果再回答。',
     skills,
   ]
     .filter(Boolean)
@@ -87,6 +88,7 @@ function writerInstructions(skills: string, currentDoc?: string): string {
   return [
     '你是 PTDoc Markdown 编写助手。只输出可写回的 Markdown。完整草稿放在 markdown 代码围栏中。',
     '使用 list_workspace_docs / read_workspace_doc 阅读工作区；不要声称已写入磁盘。',
+    '需要多角度并行调研时，可用 subagent_spawn 派发子任务（上限 3），完成后 subagent_wait_all 汇总结果。',
     currentDoc ? '当前打开文档：\n' + currentDoc.slice(0, 20000) : '',
     skills,
   ]
@@ -169,6 +171,11 @@ function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
   ];
 }
 
+/** 子代理工具 = 场景只读工具（需求 FR-13：无 subagent_*，无写权限） */
+function subagentTools(scene: 'qa' | 'writer'): PiTool[] {
+  return sceneTools(scene).filter((t) => t.name !== 'subagent_spawn' && t.name !== 'subagent_wait_all');
+}
+
 /** 用户 LLM 设置 → pi-ai OpenAI 兼容 provider（每次运行重建，读库解密最新配置） */
 function buildModels(userId: number): {
   models: ReturnType<typeof createModels>;
@@ -229,6 +236,93 @@ function toPiMessages(input: ChatRunInput): Message[] {
   return out;
 }
 
+interface ToolLoopOpts {
+  userId: number;
+  scene: 'qa' | 'writer';
+  context: Context;
+  models: ReturnType<typeof createModels>;
+  model: Model<'openai-completions'>;
+  streamOpts: { signal: AbortSignal; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' };
+  hits: RetrievedHit[];
+  spans: ChatRunResult['spans'];
+  /** 主循环回调：转发 text/thinking 增量与工具事件（子代理传 undefined：静默跑） */
+  onEvent?: (ev: StreamEvent) => void | Promise<void>;
+  maxRounds: number;
+}
+
+/**
+ * 通用工具循环（FR-08 流式 + 工具轮）。主会话与子代理共用：
+ * 子代理传自己的 context（工具面已收窄）、onEvent=undefined（静默）。
+ * 返回最终文本与 thinking。错误向上抛（AbortError 原样）。
+ */
+async function runToolLoop(opts: ToolLoopOpts): Promise<{ text: string; thinking: string }> {
+  const { userId, scene, context, models, model, streamOpts, hits, spans, onEvent, maxRounds } = opts;
+  let text = '';
+  let thinking = '';
+  for (let round = 0; round < maxRounds; round++) {
+    if (streamOpts.signal.aborted) break;
+    let assistant;
+    let roundText = '';
+    try {
+      const stream = models.stream(model, context, streamOpts);
+      for await (const ev of stream) {
+        if (ev.type === 'text_delta') {
+          roundText += ev.delta;
+          text += ev.delta;
+          await onEvent?.({ type: 'text-delta', delta: ev.delta });
+        } else if (ev.type === 'thinking_delta') {
+          await onEvent?.({ type: 'thinking-delta', delta: ev.delta });
+        } else if (ev.type === 'thinking_end') {
+          await onEvent?.({ type: 'thinking-end' });
+        }
+      }
+      assistant = await stream.result();
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') break;
+      throw e;
+    }
+    // 防丢帧：以最终 message 为准校正文本（缺尾部则补发增量）
+    const fullText = assistant.content
+      .filter((c): c is (typeof assistant.content)[number] & { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join('');
+    if (fullText && !roundText.endsWith(fullText)) {
+      const missed = fullText.startsWith(roundText) ? fullText.slice(roundText.length) : fullText;
+      if (missed) {
+        text += missed;
+        await onEvent?.({ type: 'text-delta', delta: missed });
+      }
+    }
+    for (const part of assistant.content) {
+      if (part.type === 'thinking') thinking += part.thinking;
+    }
+    if (thinking) await onEvent?.({ type: 'thinking-end' });
+    const calls = assistant.content.filter((c): c is ToolCall => c.type === 'toolCall');
+    if (!calls.length) break;
+    context.messages.push(assistant);
+    for (const call of calls) {
+      await onEvent?.({ type: 'tool-call', toolName: call.name });
+      let args: Record<string, unknown> = {};
+      try {
+        args = (call.arguments || {}) as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      const out = await executeTool(userId, scene, call.name, args, hits, spans);
+      await onEvent?.({ type: 'tool-result', toolName: call.name, result: out.slice(0, 2000) });
+      context.messages.push({
+        role: 'toolResult',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: 'text', text: out }],
+        isError: false,
+        timestamp: Date.now(),
+      } as Message);
+    }
+  }
+  return { text, thinking };
+}
+
 async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, ChatRunResult> {
   const built = buildModels(input.userId);
   if (!built) {
@@ -246,21 +340,97 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
     systemPrompt:
       input.scene === 'qa' ? qaInstructions(skills) : writerInstructions(skills, currentDoc),
     messages: toPiMessages(input),
-    tools: sceneTools(input.scene),
+    tools: [
+      ...sceneTools(input.scene),
+      {
+        name: 'subagent_spawn',
+        description: '派发一个子代理并行处理子任务。子代理只有只读工具（检索/读文档），无嵌套派发。任务描述要自包含。',
+        parameters: Type.Object({ task: Type.String({ description: '自包含的子任务描述' }) }),
+      },
+      {
+        name: 'subagent_wait_all',
+        description: '阻塞等待全部子代理完成，返回各自结果摘要（含失败原因）。汇总前必须调用。',
+        parameters: Type.Object({}),
+      },
+    ],
   };
   const hits: RetrievedHit[] = [];
   const spans: ChatRunResult['spans'] = [];
-  let text = '';
   let thinking = '';
   let inputTokens = 0;
   let outputTokens = 0;
-  // plugin tools are executed only if they expose name+execute; otherwise ignored in this loop
-  await loadPluginTools();
-  void mcpServerConfigs();
+  // 子代理状态（FR-13）：上限 3 并发，主 turn 结束统一回收
+  interface Sub {
+    id: string;
+    task: string;
+    status: 'running' | 'done';
+    result?: string;
+    error?: string;
+    ac: AbortController;
+    settle: Promise<void>;
+  }
+  const subagents = new Map<string, Sub>();
+  /** 已发过 subagent-update 的子代理（每个只通知一次） */
+  const subNotified = new Set<string>();
+  let subagentIdSeq = 0;
 
   const streamOpts = { signal: input.abort, reasoningEffort: thinkingLevel === 'off' ? undefined : thinkingLevel };
 
+  const spawnSubagent = (task: string): Sub => {
+    subagentIdSeq++;
+    const id = `sa_${subagentIdSeq}`;
+    const ac = new AbortController();
+    // 主 abort → 级联取消子代理
+    const onAbort = () => ac.abort();
+    input.abort.addEventListener('abort', onAbort, { once: true });
+    const sub: Sub = { id, task, status: 'running', ac, settle: null as unknown as Promise<void> };
+    subagents.set(id, sub);
+    sub.settle = (async () => {
+      const t0 = Date.now();
+      const spanId = `subagent:${id}`;
+      try {
+        const subContext: Context = {
+          systemPrompt:
+            input.scene === 'qa'
+              ? '你是 PTDoc 子代理，专注完成分配的子任务后简要汇报结论。' + (input.scene === 'qa' ? '引用检索结果，不编造。' : '')
+              : '你是 PTDoc 子代理，专注完成分配的子任务后简要汇报结论。',
+          messages: [{ role: 'user', content: task, timestamp: Date.now() } as Message],
+          tools: subagentTools(input.scene),
+        };
+        const r = await runToolLoop({
+          userId: input.userId,
+          scene: input.scene,
+          context: subContext,
+          models,
+          model,
+          streamOpts: { signal: ac.signal, ...{ reasoningEffort: streamOpts.reasoningEffort } },
+          hits,
+          spans,
+          maxRounds: 4,
+        });
+        sub.result = r.text.slice(0, 8000) || '（无输出）';
+        sub.status = 'done';
+        spans.push({ name: spanId, ms: Date.now() - t0, ok: true, detail: task.slice(0, 60) });
+      } catch (e) {
+        sub.error = ((e as Error).message || '子代理失败').slice(0, 200);
+        sub.status = 'done';
+        spans.push({ name: spanId, ms: Date.now() - t0, ok: false, detail: sub.error });
+      } finally {
+        input.abort.removeEventListener('abort', onAbort);
+      }
+    })();
+    return sub;
+  };
+
+  const waitAll = async (): Promise<string> => {
+    await Promise.all(Array.from(subagents.values()).map((s) => s.settle));
+    return JSON.stringify(
+      Array.from(subagents.values()).map(({ id, task, status, result, error }) => ({ id, task, status, result, error })),
+    );
+  };
+
   let lastError: string | null = null;
+  let text = '';
   for (let round = 0; round < 6; round++) {
     if (input.abort.aborted) break;
     // steer：本轮请求发出前，把排队中的追问注入为 user 消息（FR-10 工具间隙）
@@ -311,30 +481,78 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
     }
     if (thinking) yield { type: 'thinking-end' };
     const calls = assistant.content.filter((c): c is ToolCall => c.type === 'toolCall');
-    if (assistant.stopReason === 'toolUse' && calls.length > 0) {
-      context.messages.push(assistant);
-      for (const call of calls) {
-        yield { type: 'tool-call', toolName: call.name };
-        let args: Record<string, unknown> = {};
-        try {
-          args = (call.arguments || {}) as Record<string, unknown>;
-        } catch {
-          args = {};
+    if (!calls.length) break;
+    context.messages.push(assistant);
+    for (const call of calls) {
+      yield { type: 'tool-call', toolName: call.name };
+      let args: Record<string, unknown> = {};
+      try {
+        args = (call.arguments || {}) as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      // FR-13: 子代理派发（并发上限 3）
+      if (call.name === 'subagent_spawn') {
+        let spawnResult: string;
+        if (Array.from(subagents.values()).filter((s) => s.status === 'running').length >= 3) {
+          spawnResult = '子代理数量已达上限（3），请先 subagent_wait_all';
+        } else {
+          const sub = spawnSubagent(String(args.task || ''));
+          spawnResult = `子代理 ${sub.id} 已启动（任务：${sub.task.slice(0, 40)}）`;
+          yield { type: 'subagent-spawn', data: { id: sub.id, task: sub.task } };
         }
-        const out = await executeTool(input.userId, input.scene, call.name, args, hits, spans);
-        yield { type: 'tool-result', toolName: call.name, result: out.slice(0, 2000) };
+        yield { type: 'tool-result', toolName: call.name, result: spawnResult };
         context.messages.push({
           role: 'toolResult',
           toolCallId: call.id,
           toolName: call.name,
-          content: [{ type: 'text', text: out }],
+          content: [{ type: 'text', text: spawnResult }],
           isError: false,
           timestamp: Date.now(),
         } as Message);
+        continue;
       }
-      continue;
+      if (call.name === 'subagent_wait_all') {
+        const summaries = await waitAll();
+        yield { type: 'tool-result', toolName: call.name, result: summaries.slice(0, 2000) };
+        // 未通知过的子代理结果通知前端（每个只发一次）
+        for (const s of subagents.values()) {
+          if (!subNotified.has(s.id)) {
+            subNotified.add(s.id);
+            yield { type: 'subagent-update', data: { id: s.id, task: s.task, status: s.status, result: s.result, error: s.error } };
+          }
+        }
+        context.messages.push({
+          role: 'toolResult',
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [{ type: 'text', text: summaries }],
+          isError: false,
+          timestamp: Date.now(),
+        } as Message);
+        continue;
+      }
+      const out = await executeTool(input.userId, input.scene, call.name, args, hits, spans);
+      yield { type: 'tool-result', toolName: call.name, result: out.slice(0, 2000) };
+      context.messages.push({
+        role: 'toolResult',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: 'text', text: out }],
+        isError: false,
+        timestamp: Date.now(),
+      } as Message);
     }
-    break;
+  }
+  // 轮次结束：主 turn 的 data-done 前置条件 = 子代理全部 settle（FR-13 回收）
+  if (subagents.size) {
+    await Promise.all(Array.from(subagents.values()).map((s) => s.settle));
+    for (const s of subagents.values()) {
+      if (!subNotified.has(s.id)) {
+        subNotified.add(s.id);
+        yield { type: 'subagent-update', data: { id: s.id, task: s.task, status: s.status, result: s.result, error: s.error } };
+      }
+    }
   }
   const draft = input.scene === 'writer' ? extractDraft(text) : undefined;
   if (draft) yield { type: 'data-draft', data: { content: draft } };
