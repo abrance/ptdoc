@@ -86,34 +86,12 @@
             </div>
           </div>
         </div>
-        <div class="view-switch" role="tablist" aria-label="编辑视图">
-          <button id="view-edit" type="button" role="tab" aria-selected="false" data-view="edit">编辑</button>
-          <button id="view-split" type="button" role="tab" aria-selected="true" data-view="split" class="active">分栏</button>
-          <button id="view-preview" type="button" role="tab" aria-selected="false" data-view="preview">预览</button>
-        </div>
-        <div class="actions">
-          <div class="action-group">
-            <button id="open-md" type="button">打开</button>
-            <button id="upload-img" type="button">上传图片</button>
-          </div>
-          <div class="action-group">
-            <button id="share" class="btn-primary" type="button">生成分享版<span id="share-badge" class="share-badge" hidden></span></button>
-          </div>
-          <div class="action-group action-secondary" id="action-secondary">
-            <button id="toc-toggle" type="button">目录</button>
-            <button id="snapshots" type="button">快照</button>
-          </div>
-          <details id="more-menu" class="menu">
-            <summary>更多</summary>
-            <div class="menu-list" id="more-list"></div>
-          </details>
-          <div class="action-group action-account">
-            <button id="theme-toggle" class="icon-btn" type="button" title="外观：跟随系统（点击切换）" aria-label="切换外观">
-              <svg class="icon"><use href="#i-contrast"></use></svg>
-            </button>
-            <span id="whoami" class="whoami" hidden></span>
-            <button id="logout" type="button" hidden>退出</button>
-          </div>
+        <div class="action-group action-account">
+          <button id="theme-toggle" class="icon-btn" type="button" title="外观：跟随系统（点击切换）" aria-label="切换外观">
+            <svg class="icon"><use href="#i-contrast"></use></svg>
+          </button>
+          <span id="whoami" class="whoami" hidden></span>
+          <button id="logout" type="button" hidden>退出</button>
         </div>
         <input type="file" id="md-input" accept=".md,.markdown" hidden />
         <input type="file" id="img-input" accept="image/*" hidden />
@@ -188,7 +166,32 @@
         <div class="main-pages">
           <!-- 文档工作台（文档 / 归档两个 Tab 共用） -->
           <section class="main-page active" data-main="docs">
-            <div class="workspace-main">
+            <div class="workspace-page">
+              <div class="workspace-toolbar">
+                <div class="view-switch" role="tablist" aria-label="编辑视图">
+                  <button id="view-edit" type="button" role="tab" aria-selected="false" data-view="edit">编辑</button>
+                  <button id="view-split" type="button" role="tab" aria-selected="true" data-view="split" class="active">分栏</button>
+                  <button id="view-preview" type="button" role="tab" aria-selected="false" data-view="preview">预览</button>
+                </div>
+                <div class="actions">
+                  <div class="action-group">
+                    <button id="open-md" type="button">打开</button>
+                    <button id="upload-img" type="button">上传图片</button>
+                  </div>
+                  <div class="action-group">
+                    <button id="share" class="btn-primary" type="button">生成分享版<span id="share-badge" class="share-badge" hidden></span></button>
+                  </div>
+                  <div class="action-group action-secondary" id="action-secondary">
+                    <button id="toc-toggle" type="button">目录</button>
+                    <button id="snapshots" type="button">快照</button>
+                  </div>
+                  <details id="more-menu" class="menu">
+                    <summary>更多</summary>
+                    <div class="menu-list" id="more-list"></div>
+                  </details>
+                </div>
+              </div>
+              <div class="workspace-main">
               <section class="pane editor-pane">
                 <textarea id="editor" spellcheck="false" placeholder="在这里写 Markdown，支持 ```mermaid 代码块…"></textarea>
               </section>
@@ -196,6 +199,7 @@
               <section class="pane preview-pane">
                 <article id="preview" class="markdown-body"></article>
               </section>
+              </div>
             </div>
           </section>
           <!-- 智能体主界面（Sider = 会话导航，这里 = 会话工作区） -->

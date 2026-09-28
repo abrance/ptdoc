@@ -239,8 +239,9 @@ function setNav(page: NavPage): void {
     m.classList.toggle('active', m.dataset.main === page || (page === 'archive' && m.dataset.main === 'docs'));
   });
   // 归档 Tab 复用文档工作台：视图切换按钮仅在文档/归档页有意义
-  const docTabs = document.querySelector('.view-switch') as HTMLElement | null;
-  if (docTabs) docTabs.style.visibility = page === 'docs' || page === 'archive' ? '' : 'hidden';
+  // 文档工作台工具条（视图切换+文档操作）仅文档/归档页有意义
+  const toolbar = document.querySelector('.workspace-toolbar') as HTMLElement | null;
+  if (toolbar) toolbar.style.display = page === 'docs' || page === 'archive' ? '' : 'none';
   if (page !== 'docs') {
     if (isMobileLayout()) setSidebarOpen(true);
     else if (document.body.classList.contains('sidebar-collapsed')) setSidebarOpen(true);
