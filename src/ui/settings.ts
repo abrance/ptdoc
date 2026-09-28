@@ -106,7 +106,7 @@ export function initSettingsPanel(opts: {
         </div>
       </form>`;
     body('llm').innerHTML = `
-      <form class="settings-form">
+      <form id="llm-form" class="settings-form">
         <p class="settings-hint" id="llm-hint"></p>
         <label>Base URL<input name="llm_base_url" placeholder="https://api.deepseek.com/v1" /></label>
         <label>模型名<input name="llm_model" placeholder="deepseek-chat" /></label>
@@ -114,7 +114,7 @@ export function initSettingsPanel(opts: {
         <div class="settings-ops"><button type="button" id="llm-save" class="btn-primary">保存大模型</button></div>
       </form>`;
     body('qdrant').innerHTML = `
-      <form class="settings-form">
+      <form id="qdrant-form" class="settings-form">
         <p class="settings-hint">归档「同步」把分享版 Markdown 写入该 collection。使用 ptdoc-qdrant-gateway 时 URL 填网关地址。</p>
         <label>URL<input name="qdrant_url" placeholder="http://ptdoc-qdrant-gateway:8080" /></label>
         <label>Collection<input name="qdrant_collection" /></label>
@@ -124,13 +124,13 @@ export function initSettingsPanel(opts: {
         <div class="settings-ops"><button type="button" id="qdrant-save" class="btn-primary">保存知识库</button></div>
       </form>`;
     body('password').innerHTML = `
-      <form class="settings-form">
+      <form id="password-form" class="settings-form">
         <label>原密码<input name="old_password" type="password" autocomplete="current-password" /></label>
         <label>新密码<input name="new_password" type="password" autocomplete="new-password" /></label>
         <div class="settings-ops"><button type="button" id="password-save" class="btn-primary">更新密码</button></div>
       </form>`;
     body('token').innerHTML = `
-      <form class="settings-form">
+      <form id="token-form" class="settings-form">
         <p class="settings-hint" id="api-token-hint"></p>
         <label>新 Token<input name="api_token" autocomplete="off" placeholder="16–64 位字母或数字" /></label>
         <div class="settings-ops">
@@ -223,7 +223,7 @@ export function initSettingsPanel(opts: {
   const fillLlm = async (): Promise<void> => {
     const res = await fetch('/api/agents/llm');
     const p = (await res.json()) as { base_url: string; model: string; secret_configured: boolean };
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('llm-form') as HTMLFormElement;
     (form.elements.namedItem('llm_base_url') as HTMLInputElement).value = p.base_url;
     (form.elements.namedItem('llm_model') as HTMLInputElement).value = p.model;
     const key = form.elements.namedItem('llm_api_key') as HTMLInputElement;
@@ -243,7 +243,7 @@ export function initSettingsPanel(opts: {
       top_k: number;
       secret_configured: boolean;
     };
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('qdrant-form') as HTMLFormElement;
     (form.elements.namedItem('qdrant_url') as HTMLInputElement).value = p.url;
     (form.elements.namedItem('qdrant_collection') as HTMLInputElement).value = p.collection;
     (form.elements.namedItem('qdrant_vector') as HTMLInputElement).value = p.vector_name;
@@ -256,7 +256,7 @@ export function initSettingsPanel(opts: {
   };
 
   const saveLlm = async (): Promise<void> => {
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('llm-form') as HTMLFormElement;
     const body: Record<string, unknown> = {
       base_url: (form.elements.namedItem('llm_base_url') as HTMLInputElement).value,
       model: (form.elements.namedItem('llm_model') as HTMLInputElement).value,
@@ -275,7 +275,7 @@ export function initSettingsPanel(opts: {
   };
 
   const saveQdrant = async (): Promise<void> => {
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('qdrant-form') as HTMLFormElement;
     const body: Record<string, unknown> = {
       url: (form.elements.namedItem('qdrant_url') as HTMLInputElement).value,
       collection: (form.elements.namedItem('qdrant_collection') as HTMLInputElement).value,
@@ -296,7 +296,7 @@ export function initSettingsPanel(opts: {
   };
 
   const changePassword = async (): Promise<void> => {
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('password-form') as HTMLFormElement;
     const old_password = (form.elements.namedItem('old_password') as HTMLInputElement).value;
     const new_password = (form.elements.namedItem('new_password') as HTMLInputElement).value;
     try {
@@ -316,7 +316,7 @@ export function initSettingsPanel(opts: {
 
   const fillApiToken = async (): Promise<void> => {
     const hint = document.getElementById('api-token-hint') as HTMLElement;
-    const input = (document.getElementById('settings-form') as HTMLFormElement).elements.namedItem(
+    const input = (document.getElementById('token-form') as HTMLFormElement).elements.namedItem(
       'api_token',
     ) as HTMLInputElement;
     const clearBtn = document.getElementById('api-token-clear') as HTMLButtonElement;
@@ -331,7 +331,7 @@ export function initSettingsPanel(opts: {
   };
 
   const saveApiToken = async (): Promise<void> => {
-    const form = document.getElementById('settings-form') as HTMLFormElement;
+    const form = document.getElementById('token-form') as HTMLFormElement;
     const token = (form.elements.namedItem('api_token') as HTMLInputElement).value;
     try {
       const res = await fetch('/api/auth/token', {
