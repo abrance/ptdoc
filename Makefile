@@ -10,7 +10,9 @@ COMPOSE  := docker compose -f deploy/docker-compose/docker-compose.yml
 SITE     ?=
 USER     ?=
 
-.PHONY: help build up down restart logs ps exec site deploy deploy-site
+.PHONY: help build up down restart logs ps exec site deploy deploy-site ptdocctl ptdocctl-install
+
+PTDOCCTL_DIST ?= dist/ptdocctl
 
 help: ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -24,6 +26,12 @@ up: ## 构建并后台启动（一键部署）
 
 down: ## 停止并移除容器（data/ 数据保留）
 	$(COMPOSE) down
+
+ptdocctl: ## 构建并打包 ptdocctl → dist/ptdocctl（tar.gz + SHA256SUMS）
+	scripts/ptdocctl-package.sh $(PTDOCCTL_DIST)
+
+ptdocctl-install: ## 编译本机 ptdocctl 并安装到 /usr/local/bin
+	cd ptdocctl && go build -o /usr/local/bin/ptdocctl .
 
 restart: ## 重启服务（代码更新后常用）
 	$(COMPOSE) restart

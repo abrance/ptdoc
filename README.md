@@ -216,6 +216,29 @@ sudo systemctl enable --now ptdoc-dev    # 开机自启 + 立即启动
 
 > 相同 mermaid 内容（含主题版本号）只会上传一次；再次「生成分享版」会直接复用缓存里的远程 URL。修改图表配色/线条样式后把 `MERMAID_CACHE_VERSION` 自增即可让旧缓存失效。若手动删除了桶里的某张图，对应缓存需手动清库（`data/ptdoc.db`）。
 
+## ptdocctl 命令行客户端
+
+`ptdocctl/` 是一个零依赖（纯 Go 标准库）的 ptdoc server 客户端，适合脚本 / CI / 智能体批量拉取和推送文档。认证与浏览器端一致：`--token`（设置页生成的静态 Token）或 `--user`/`--pass` 密码登录。
+
+```bash
+ptdocctl --url https://ptdoc.xiaoyxq.top --token xxxx whoami   # 验证连接与身份
+ptdocctl --url ... --token ... list                            # 列出工作区全部文档
+ptdocctl --url ... --token ... get <doc_id|doc_key>            # 打印文档全文
+ptdocctl --url ... --token ... pull [dir]                      # 全量拉取工作区 md 到本地目录
+ptdocctl --url ... --token ... push a.md b.md                  # 上传 md（doc_key=文件名）
+ptdocctl --url ... --token ... pushr ./docs                    # 递归上传目录，doc_key 含子目录路径
+ptdocctl --url ... --token ... delete <doc_id>
+ptdocctl --url ... --token ... search <keyword>
+```
+
+`--url/--token/--user/--pass` 是全局参数，子命令前后均可，也支持 `--token=xxx` 连写。
+
+安装：
+
+- **下载发布包**：打 `v*` tag 后 CI 自动把各平台 `tar.gz`（含 SHA256SUMS）挂到 [GitHub Releases](https://github.com/abrance/ptdoc/releases)，解压即用；
+- **源码编译**：`make ptdocctl-install`（需要 Go ≥ 1.21）→ `/usr/local/bin/ptdocctl`；
+- **本地打包**：`make ptdocctl` → `dist/ptdocctl/`（与 CI 产物一致）。
+
 ## 如何扩展
 
 - **改图表配色**：编辑 `src/core/mermaid.ts` 的 `DIAGRAM_THEME`（背景/文字/线条/强调色等）。
