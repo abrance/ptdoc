@@ -2390,3 +2390,24 @@ body.toc-on .preview-pane {
     animation: none !important;
   }
 }
+
+ /* 智能体消息内的 markdown（复用 .markdown-body，缩配聊天流） */
+ .agent-md {
+   font-size: 13px;
+   line-height: 1.55;
+ }
+
+ .agent-md > :first-child {
+   margin-top: 0;
+ }
+
+ .agent-md > :last-child {
+   margin-bottom: 0;
+ }
+
+ .agent-md h1,
+ .agent-md h2,
+ .agent-md h3 {
+   margin-top: 1em;
+   font-size: 1.1em;
+ }
