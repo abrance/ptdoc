@@ -23,7 +23,7 @@ function setupDb(): { userId: number } {
   loadServerEnv({ PTDOC_DATA_KEY: 'a'.repeat(64) });
   initDB(join(mkdtempSync(join(tmpdir(), 'ptdoc-')), 't.db'));
   const u = createUser('llmrunner' + seq, 'x'.repeat(60), 'member');
-  upsertLlmProfile(u.id, 'http://localhost:1/v1', encryptSecret('sk-test'), 'fake-model');
+  upsertLlmProfile(u.id, 'http://localhost:1/v1', encryptSecret('sk-test'), 'fake-model', 'high');
   upsertDoc(u.id, 'notes/a' + seq + '.md', 'A', 'a.md', '# A\n\n正文A');
   return { userId: u.id };
 }
@@ -120,6 +120,11 @@ function textFrame(content: string, finish: string | null = null, usage?: any): 
     ...(usage ? { usage } : {}),
   };
 }
+// OpenAI SSE 帧：thinking delta（DeepSeek 风格 reasoning_content）
+function thinkFrame(content: string): Record<string, unknown> {
+  return { choices: [{ delta: { reasoning_content: content } }] };
+}
+
 // OpenAI SSE 帧：工具调用 delta
 function toolFrame(name: string, args: string, id = 'call_1'): Record<string, unknown> {
   return {
@@ -130,31 +135,116 @@ function toolFrame(name: string, args: string, id = 'call_1'): Record<string, un
   };
 }
 
-test('defaultRunner 端到端：mock OpenAI 端点，文本→工具→文本 两轮循环', async () => {
+test('defaultRunner 端到端：mock OpenAI 端点，thinking→工具→文本 三轮流式', async () => {
   const { userId } = setupDb();
   setChatRunnerForTests(null);
   const port = await startMock();
   // 更新 LLM profile 指向 mock
-  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model');
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'high');
 
-  // 第 1 轮：模型请求工具；第 2 轮：模型给最终回答
+  // 第 1 轮：思考 + 工具调用；第 2 轮：最终回答
   mockResponses = [
-    [toolFrame('search_knowledge', '{"query":"架构"}')],
+    [thinkFrame('先分析问题…'), toolFrame('search_knowledge', '{"query":"架构"}')],
     [textFrame('根据检索结果回答', 'stop', { prompt_tokens: 10, completion_tokens: 5 })],
   ];
 
+  const events: StreamEvent[] = [];
+  const gen = runChat({ userId, scene: 'qa', messages: [], input: 'PTDoc 架构是什么？', abort: new AbortController().signal });
+  let result: ChatRunResult | undefined;
+  for (;;) {
+    const r = await gen.next();
+    if (r.done) {
+      result = r.value;
+      break;
+    }
+    events.push(r.value);
+  }
+
   try {
-    const result = await run({ userId, scene: 'qa', input: 'PTDoc 架构是什么？' });
-    // 工具失败（无 Qdrant 配置）返回错误字符串，但不阻塞循环
+    // thinking 事件流式转发
+    const td = events.find((e) => e.type === 'thinking-delta');
+    assert.ok(td, '应有 thinking-delta 事件');
+    assert.equal(td.delta, '先分析问题…');
+    assert.ok(events.some((e) => e.type === 'thinking-end'), '应有 thinking-end 事件');
+    assert.equal(result!.thinking, '先分析问题…');
+    // 文本流式逐 token（真流式：单 token 文本就是单 delta）
+    assert.ok(events.some((e) => e.type === 'text-delta' && e.delta === '根据检索结果回答'));
+    // 工具循环与 usage 不变
     assert.ok(seenRequests.length >= 2, '应发生两轮请求，实际 ' + seenRequests.length);
-    assert.equal(seenRequests[0].model, 'fake-model');
     assert.ok(seenRequests[0].tools?.some((t: any) => t.function?.name === 'search_knowledge'));
-    // 第 2 轮请求应包含 tool 消息
     assert.ok(seenRequests[1].messages.some((m: any) => m.role === 'toolResult' || m.role === 'tool'));
-    assert.equal(result.text, '根据检索结果回答');
-    assert.equal(result.model, 'fake-model');
-    assert.equal(result.inputTokens, 10);
-    assert.equal(result.outputTokens, 5);
+    assert.equal(result!.text, '根据检索结果回答');
+    assert.equal(result!.inputTokens, 10);
+    assert.equal(result!.outputTokens, 5);
+    // 思考档位透传（FR-09）：请求体应带 reasoning_effort=high
+    assert.equal(seenRequests[0].reasoning_effort, 'high');
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+test('thinking_level=off 时不传 reasoning_effort，非思考轮不发 thinking 事件', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  mockResponses = [[textFrame('直接回答', 'stop', { prompt_tokens: 3, completion_tokens: 2 })]];
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: 'hi', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) {
+        result = r.value;
+        break;
+      }
+      events.push(r.value);
+    }
+    assert.equal(seenRequests[0].reasoning_effort, undefined);
+    assert.ok(!events.some((e) => e.type === 'thinking-delta'));
+    assert.equal(result!.text, '直接回答');
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+test('steer：工具间隙注入追问到 pi-ai 消息流（FR-10）', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'high');
+  const steerQueue: string[] = ['补充：只看架构图'];
+  mockResponses = [
+    [toolFrame('search_knowledge', '{"query":"架构"}')],
+    [textFrame('好的', 'stop', { prompt_tokens: 5, completion_tokens: 2 })],
+  ];
+  try {
+    const events: StreamEvent[] = [];
+    const gen = runChat({
+      userId,
+      scene: 'qa',
+      messages: [],
+      input: '介绍架构',
+      abort: new AbortController().signal,
+      steers: steerQueue,
+    });
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) break;
+      events.push(r.value);
+    }
+    assert.ok(events.some((e) => e.type === 'steer-accepted'), '应有 steer-accepted 事件');
+    assert.equal(steerQueue.length, 0, '队列应被消费清空');
+    // 第 2 轮请求应包含注入的 user 消息
+    const secondRound = seenRequests[1].messages;
+    assert.ok(secondRound.some((m: any) => m.role === 'user' && JSON.stringify(m.content).includes('架构图')));
   } finally {
     mockServer?.close();
     mockServer = null;

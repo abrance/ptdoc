@@ -2094,6 +2094,116 @@ body.toc-on .preview-pane {
    border-radius: 8px;
  }
 
+ /* 消息解剖头部（FR-12） */
+ .msg-meta {
+   display: flex;
+   gap: 8px;
+   font-size: 11px;
+   color: var(--muted);
+   margin-bottom: 3px;
+ }
+
+ /* 思考折叠块（FR-07） */
+ .msg details.think {
+   margin-bottom: 4px;
+   border: 1px solid var(--border);
+   border-radius: 8px;
+   overflow: hidden;
+ }
+
+ .msg details.think > summary.think-head {
+   cursor: pointer;
+   padding: 5px 10px;
+   font-size: 12px;
+   color: var(--muted);
+   user-select: none;
+   list-style: none;
+ }
+
+ .msg details.think > summary.think-head::before {
+   content: '▸ ';
+ }
+
+ .msg details.think[open] > summary.think-head::before {
+   content: '▾ ';
+ }
+
+ .msg details.think > pre {
+   font-family: ui-monospace, monospace;
+   font-size: 12px;
+   padding: 8px 10px;
+   border-top: 1px solid var(--border);
+   color: var(--muted);
+   max-height: 320px;
+   overflow: auto;
+ }
+
+ /* 失败回复（FR-11） */
+ .msg.assistant.failed {
+   border: 1px solid var(--danger-line);
+   background: var(--danger-soft);
+   border-radius: 8px;
+   padding: 8px 10px;
+ }
+
+ .msg-error {
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   color: var(--danger);
+   font-size: 12px;
+   margin-top: 4px;
+ }
+
+ .msg-error button {
+   font-size: 12px;
+ }
+
+ /* qa 引用角标（FR-14） */
+ .msg sup.cite {
+   cursor: pointer;
+   color: var(--accent);
+   font-size: 11px;
+   padding: 0 2px;
+ }
+
+ .msg sup.cite:hover {
+   text-decoration: underline;
+ }
+
+ /* steer 队列气泡（FR-10） */
+ .agent-steers {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 6px;
+   margin-bottom: 6px;
+ }
+
+ .agent-steers:empty {
+   display: none;
+ }
+
+ .steer-chip {
+   display: inline-flex;
+   align-items: center;
+   gap: 6px;
+   background: var(--accent-soft);
+   border: 1px solid var(--border);
+   border-radius: 999px;
+   padding: 2px 10px;
+   font-size: 12px;
+ }
+
+ .steer-chip button {
+   border: 0;
+   background: none;
+   cursor: pointer;
+   color: var(--muted);
+   padding: 0;
+   font-size: 14px;
+   line-height: 1;
+ }
+
  .agent-draft,
  .agent-input {
    display: flex;
