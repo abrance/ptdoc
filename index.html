@@ -69,14 +69,21 @@
           </button>
           <div class="brand" id="brand">PTDoc</div>
           <nav class="nav-tabs" role="tablist" aria-label="主导航">
-            <button type="button" role="tab" data-nav="view" class="active" aria-selected="true">视图</button>
-            <button type="button" role="tab" data-nav="search" aria-selected="false">检索</button>
-            <button type="button" role="tab" data-nav="scene" aria-selected="false">场景</button>
-            <button type="button" role="tab" data-nav="integration" aria-selected="false">集成</button>
+            <button type="button" role="tab" data-nav="docs" class="active" aria-selected="true">文档</button>
+            <button type="button" role="tab" data-nav="archive" aria-selected="false">归档</button>
+            <button type="button" role="tab" data-nav="agent" aria-selected="false">智能体</button>
+            <button type="button" role="tab" data-nav="share" aria-selected="false">分享</button>
+            <button type="button" role="tab" data-nav="settings" aria-selected="false">设置</button>
           </nav>
           <div class="doc-meta">
             <span id="doc-title" class="doc-title">未命名</span>
             <span id="doc-source" class="doc-source" hidden></span>
+          </div>
+          <div class="global-search">
+            <input id="global-search" type="search" placeholder="搜索文档（Ctrl+K）…" aria-label="全文搜索" autocomplete="off" />
+            <div id="global-search-pop" class="global-search-pop" hidden>
+              <ul id="global-search-list" class="history-list"></ul>
+            </div>
           </div>
         </div>
         <div class="view-switch" role="tablist" aria-label="编辑视图">
@@ -101,7 +108,6 @@
             <div class="menu-list" id="more-list"></div>
           </details>
           <div class="action-group action-account">
-            <button id="history" type="button" hidden>历史</button>
             <button id="theme-toggle" class="icon-btn" type="button" title="外观：跟随系统（点击切换）" aria-label="切换外观">
               <svg class="icon"><use href="#i-contrast"></use></svg>
             </button>
