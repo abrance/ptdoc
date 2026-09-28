@@ -88,10 +88,13 @@ async function defaultQuery(opts: {
     });
     const text = await res.text();
     if (!res.ok) {
-      if (res.status === 400 || /inference|embedding|text query|document/i.test(text)) {
+      // 仅在 Qdrant 明确说未启用 inference 时给"未启用"提示；其余情况透传上游错误正文
+      //（如 litellm 的向量化校验错误），避免把真实原因吞成误导性文案。
+      if (/Service not enabled|inference.*not enabled|not enabled.*inference/i.test(text)) {
         throw new HttpError(400, TEXT_NOT_ENABLED);
       }
-      throw new HttpError(400, '知识库连接失败');
+      const flat = text.replace(/\s+/g, ' ').trim();
+      throw new HttpError(400, '知识库检索失败：' + (flat.slice(0, 200) || 'HTTP ' + res.status));
     }
     const json = JSON.parse(text) as { result?: { points?: QdrantQueryPoint[] } | QdrantQueryPoint[] };
     const result = json.result;
