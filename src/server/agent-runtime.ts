@@ -38,6 +38,8 @@ export interface ChatRunInput {
   input: string;
   docId?: number;
   abort: AbortSignal;
+  /** steer：工具间隙注入的追问（FR-10，agent-api 在流式期间填充） */
+  steers?: string[];
 }
 
 export interface ChatRunResult {
@@ -48,6 +50,9 @@ export interface ChatRunResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  thinking?: string;
+  /** 流式过程中发生的错误（未中断循环时随结果返回，供 API 层标记失败 turn） */
+  errorText?: string;
 }
 
 export type ChatRunner = (input: ChatRunInput) => AsyncGenerator<StreamEvent, ChatRunResult>;
@@ -71,6 +76,7 @@ function qaInstructions(skills: string): string {
   return [
     '你是 PTDoc 知识库问答助手。优先用 search_knowledge 检索后再回答。',
     '引用检索片段，不要编造来源。未命中时明确说明。',
+    '回答正文中在引用检索片段处标注角标 [1] [2]（编号对应检索返回顺序），便于溯源。',
     skills,
   ]
     .filter(Boolean)
@@ -136,6 +142,8 @@ async function executeTool(
   }
 }
 
+type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
+
 /** 场景工具定义（TypeBox schema，由 pi-ai 转换成各 provider 的 wire 格式） */
 function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
   if (scene === 'qa') {
@@ -162,7 +170,11 @@ function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
 }
 
 /** 用户 LLM 设置 → pi-ai OpenAI 兼容 provider（每次运行重建，读库解密最新配置） */
-function buildModels(userId: number): { models: ReturnType<typeof createModels>; model: Model<'openai-completions'> } | null {
+function buildModels(userId: number): {
+  models: ReturnType<typeof createModels>;
+  model: Model<'openai-completions'>;
+  thinkingLevel: ThinkingLevel;
+} | null {
   const llm = getLlmProfile(userId);
   if (!llm) return null;
   const apiKey = decryptSecret(llm.api_key_enc);
@@ -172,7 +184,8 @@ function buildModels(userId: number): { models: ReturnType<typeof createModels>;
     api: 'openai-completions',
     provider: 'ptdoc-llm',
     baseUrl: joinUrl(llm.base_url, ''),
-    reasoning: false,
+    // reasoning 开启后 pi-ai 才接受 thinking 档位；具体端点不支持时传参被静默忽略
+    reasoning: llm.thinking_level !== 'off',
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
@@ -193,7 +206,7 @@ function buildModels(userId: number): { models: ReturnType<typeof createModels>;
   });
   const models = createModels();
   models.setProvider(provider);
-  return { models, model };
+  return { models, model, thinkingLevel: (llm.thinking_level || 'high') as ThinkingLevel };
 }
 
 function joinUrl(base: string, _path: string): string {
@@ -222,7 +235,7 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
     yield { type: 'error', errorText: '请先在设置中填写大模型 Base URL、API Key 与模型名' };
     return { text: '', hits: [], spans: [], model: '', inputTokens: 0, outputTokens: 0 };
   }
-  const { models, model } = built;
+  const { models, model, thinkingLevel } = built;
   const skills = readSkillInstructions();
   let currentDoc = '';
   if (input.docId) {
@@ -238,31 +251,65 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
   const hits: RetrievedHit[] = [];
   const spans: ChatRunResult['spans'] = [];
   let text = '';
+  let thinking = '';
   let inputTokens = 0;
   let outputTokens = 0;
   // plugin tools are executed only if they expose name+execute; otherwise ignored in this loop
   await loadPluginTools();
   void mcpServerConfigs();
 
+  const streamOpts = { signal: input.abort, reasoningEffort: thinkingLevel === 'off' ? undefined : thinkingLevel };
+
+  let lastError: string | null = null;
   for (let round = 0; round < 6; round++) {
     if (input.abort.aborted) break;
+    // steer：本轮请求发出前，把排队中的追问注入为 user 消息（FR-10 工具间隙）
+    const steers = input.steers?.splice(0);
+    for (const s of steers || []) {
+      context.messages.push({ role: 'user', content: s, timestamp: Date.now() } as Message);
+      yield { type: 'steer-accepted', data: { text: s } };
+    }
     let assistant;
+    let roundText = '';
     try {
-      assistant = await models.complete(model, context, { signal: input.abort });
+      // 真流式：逐事件转发 text/thinking delta（FR-07/08）
+      const stream = models.stream(model, context, streamOpts);
+      for await (const ev of stream) {
+        if (ev.type === 'text_delta') {
+          roundText += ev.delta;
+          text += ev.delta;
+          yield { type: 'text-delta', delta: ev.delta };
+        } else if (ev.type === 'thinking_delta') {
+          yield { type: 'thinking-delta', delta: ev.delta };
+        } else if (ev.type === 'thinking_end') {
+          yield { type: 'thinking-end' };
+        }
+      }
+      assistant = await stream.result();
     } catch (e) {
       if ((e as Error).name === 'AbortError') break;
-      yield { type: 'error', errorText: ((e as Error).message || '大模型请求失败').slice(0, 200) };
-      return { text, hits, spans, model: model.id, inputTokens, outputTokens };
+      lastError = ((e as Error).message || '大模型请求失败').slice(0, 200);
+      yield { type: 'error', errorText: lastError };
+      return { text, thinking, hits, spans, model: model.id, inputTokens, outputTokens, errorText: lastError };
     }
     inputTokens = assistant.usage.input || inputTokens;
     outputTokens = assistant.usage.output || outputTokens;
-    for (const part of assistant.content) {
-      if (part.type === 'text') {
-        // 流式逐段补发（complete 一次性返回，这里按段发 delta 事件保持前端协议不变）
-        text += part.text;
-        yield { type: 'text-delta', delta: part.text };
+    // 防丢帧：以最终 message 为准校正文本（缺尾部则补发增量）
+    const fullText = assistant.content
+      .filter((c): c is (typeof assistant.content)[number] & { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join('');
+    if (fullText && !roundText.endsWith(fullText)) {
+      const missed = fullText.startsWith(roundText) ? fullText.slice(roundText.length) : fullText;
+      if (missed) {
+        text += missed;
+        yield { type: 'text-delta', delta: missed };
       }
     }
+    for (const part of assistant.content) {
+      if (part.type === 'thinking') thinking += part.thinking;
+    }
+    if (thinking) yield { type: 'thinking-end' };
     const calls = assistant.content.filter((c): c is ToolCall => c.type === 'toolCall');
     if (assistant.stopReason === 'toolUse' && calls.length > 0) {
       context.messages.push(assistant);
@@ -291,7 +338,7 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
   }
   const draft = input.scene === 'writer' ? extractDraft(text) : undefined;
   if (draft) yield { type: 'data-draft', data: { content: draft } };
-  return { text, draft, hits, spans, model: model.id, inputTokens, outputTokens };
+  return { text, draft, thinking, hits, spans, model: model.id, inputTokens, outputTokens, ...(lastError ? { errorText: lastError } : {}) };
 }
 
 export async function* runChat(input: ChatRunInput): AsyncGenerator<StreamEvent, ChatRunResult> {

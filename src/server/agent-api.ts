@@ -6,6 +6,8 @@ import { decryptSecret, encryptSecret } from './storage.ts';
 import {
   createAgentConversation,
   deleteAgentConversation,
+  deleteAgentTraceByTurn,
+  deleteAgentTurnsByIds,
   getAgentConversation,
   getAgentTraceByTurn,
   getAgentTurn,
@@ -19,6 +21,7 @@ import {
   listAgentConversations,
   listAgentTurns,
   touchAgentConversation,
+  updateAgentTurnResult,
   upsertDoc,
   upsertLlmProfile,
   upsertQdrantProfile,
@@ -42,6 +45,8 @@ import {
 import { newTraceId, runChat } from './agent-runtime.ts';
 
 const aborts = new Map<string, AbortController>();
+/** steer 队列：流式期间 POST chat 的追问入这里，由进行中的 runChat 消费（FR-10） */
+const steers = new Map<string, string[]>();
 
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -165,6 +170,7 @@ async function handleUser(
     return sendJson(res, 200, {
       base_url: row?.base_url || '',
       model: row?.model || '',
+      thinking_level: row?.thinking_level || 'high',
       secret_configured: !!row,
     });
   }
@@ -176,8 +182,10 @@ async function handleUser(
     const existing = getLlmProfile(uid);
     const key = keyBody || (existing ? decryptSecret(existing.api_key_enc) : '');
     if (!baseUrl || !model || !key) throw new HttpError(400, '请填写大模型 Base URL、API Key 与模型名');
-    upsertLlmProfile(uid, baseUrl, encryptSecret(key), model);
-    return sendJson(res, 200, { base_url: baseUrl, model, secret_configured: true });
+    const rawLevel = String(b.thinking_level || existing?.thinking_level || 'high');
+    const thinkingLevel = ['off', 'low', 'medium', 'high'].includes(rawLevel) ? rawLevel : 'high';
+    upsertLlmProfile(uid, baseUrl, encryptSecret(key), model, thinkingLevel);
+    return sendJson(res, 200, { base_url: baseUrl, model, thinking_level: thinkingLevel, secret_configured: true });
   }
 
   if (path === '/api/agents/qdrant' && req.method === 'GET') {
@@ -243,7 +251,13 @@ async function handleUser(
 
   const chat = path.match(/^\/api\/agents\/conversations\/(\d+)\/chat$/);
   if (chat && req.method === 'POST') {
-    return await handleChat(req, res, uid, Number(chat[1]));
+    const b = await readJson(req);
+    return await handleChat(req, res, uid, Number(chat[1]), b);
+  }
+
+  const retry = path.match(/^\/api\/agents\/conversations\/(\d+)\/turns\/(\d+)\/retry$/);
+  if (retry && req.method === 'POST') {
+    return await handleRetry(req, res, uid, Number(retry[1]), Number(retry[2]));
   }
 
   const stop = path.match(/^\/api\/agents\/conversations\/(\d+)\/stop$/);
@@ -352,25 +366,39 @@ async function handleUser(
   throw new HttpError(404, '接口不存在');
 }
 
-async function handleChat(req: IncomingMessage, res: ServerResponse, uid: number, cid: number): Promise<void> {
+async function handleChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  uid: number,
+  cid: number,
+  bodyOverride?: { input: string; doc_id?: number },
+): Promise<void> {
   const conv = getAgentConversation(uid, cid);
   if (!conv) throw new HttpError(403, '权限不足');
   if (!getLlmProfile(uid)) throw new HttpError(400, '请先在设置中填写大模型 Base URL、API Key 与模型名');
   if (conv.scene === 'qa' && !getQdrantProfile(uid)) {
     throw new HttpError(400, '请先在设置中填写 Qdrant URL 与 collection');
   }
-  const b = await readJson(req);
+  const b = bodyOverride ?? (await readJson(req));
   const input = String(b.input || '').trim();
   if (!input) throw new HttpError(400, '输入不能为空');
+  const key = uid + ':' + cid;
+  if (aborts.has(key)) {
+    const q = steers.get(key) ?? [];
+    q.push(input);
+    steers.set(key, q);
+    return sendJson(res, 200, { queued: true });
+  }
   const docId = b.doc_id != null ? Number(b.doc_id) : undefined;
   insertAgentTurn({ conversation_id: cid, user_id: uid, role: 'user', content: input });
   const history = listAgentTurns(uid, cid)
     .slice(0, -1)
     .map((t) => ({ role: t.role as 'user' | 'assistant', content: t.content }));
-  const key = uid + ':' + cid;
   aborts.get(key)?.abort();
   const ac = new AbortController();
   aborts.set(key, ac);
+  const steerQueue: string[] = [];
+  steers.set(key, steerQueue);
 
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -378,20 +406,35 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, uid: number
   res.setHeader('Connection', 'keep-alive');
 
   const t0 = Date.now();
-  const gen = runChat({
-    userId: uid,
-    scene: conv.scene as 'qa' | 'writer',
-    messages: history,
-    input,
-    docId,
-    abort: ac.signal,
-  });
-  let result = await gen.next();
-  while (!result.done) {
-    writeSse(res, result.value);
-    result = await gen.next();
+  let out;
+  let failed: string | null = null;
+  let streamError: string | null = null;
+  try {
+    const gen = runChat({
+      userId: uid,
+      scene: conv.scene as 'qa' | 'writer',
+      messages: history,
+      input,
+      docId,
+      abort: ac.signal,
+      steers: steerQueue,
+    });
+    let result = await gen.next();
+    while (!result.done) {
+      if ((result.value as { type?: string }).type === 'error') {
+        streamError = ((result.value as { errorText?: string }).errorText || '生成失败').slice(0, 200);
+      }
+      writeSse(res, result.value);
+      result = await gen.next();
+    }
+    out = result.value;
+  } catch (e) {
+    failed = ((e as Error).message || '生成失败').slice(0, 200);
+    out = { text: '', hits: [], spans: [], model: '', inputTokens: 0, outputTokens: 0 };
   }
-  const out = result.value;
+  const aborted = ac.signal.aborted;
+  // 失败判定：异常 > 流内 error 事件（不依赖 runner return 契约）> return 值的 errorText
+  const errorText = failed || streamError || (out as { errorText?: string }).errorText || null;
   const traceId = newTraceId();
   const assistant = insertAgentTurn({
     conversation_id: cid,
@@ -400,6 +443,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, uid: number
     content: out.text,
     draft_md: out.draft || null,
     trace_id: traceId,
+    status: aborted ? 'ok' : errorText ? 'error' : 'ok',
+    error_message: aborted ? null : errorText,
+    thinking: out.thinking || null,
   });
   insertAgentTrace({
     trace_id: traceId,
@@ -412,13 +458,43 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, uid: number
     latency_ms: Date.now() - t0,
     hits_json: JSON.stringify(out.hits || []),
     spans_json: JSON.stringify(out.spans || []),
+    thinking: out.thinking || null,
     created_at: Date.now(),
   });
   if (!conv.title) touchAgentConversation(uid, cid, input.slice(0, 40));
   else touchAgentConversation(uid, cid);
-  writeSse(res, { type: 'data-done', data: { turn_id: assistant.id, trace_id: traceId } });
+  writeSse(res, {
+    type: 'data-done',
+    data: {
+      turn_id: assistant.id,
+      trace_id: traceId,
+      status: assistant.status,
+      error_message: assistant.error_message,
+      model: out.model,
+      latency_ms: Date.now() - t0,
+      input_tokens: out.inputTokens,
+      output_tokens: out.outputTokens,
+    },
+  });
   writeSse(res, { type: 'finish' });
   res.write('data: [DONE]\n\n');
   res.end();
   aborts.delete(key);
+  steers.delete(key);
+}
+
+/** FR-11：删除失败 assistant turn，按原 user turn 重新发起（SSE 复用 handleChat 的流式协议） */
+async function handleRetry(req: IncomingMessage, res: ServerResponse, uid: number, cid: number, turnId: number): Promise<void> {
+  const turn = getAgentTurn(uid, cid, turnId);
+  if (!turn) throw new HttpError(403, '权限不足');
+  if (turn.role !== 'assistant') throw new HttpError(400, '只能重试回复');
+  const turns = listAgentTurns(uid, cid);
+  const idx = turns.findIndex((t) => t.id === turnId);
+  const userTurn = [...turns.slice(0, idx)].reverse().find((t) => t.role === 'user');
+  if (!userTurn) throw new HttpError(400, '找不到原始提问');
+  // 删除失败 assistant turn 与原 user turn，重走 chat（历史由 handleChat 重新读取）
+  deleteAgentTurnsByIds(uid, cid, [turnId, userTurn.id]);
+  deleteAgentTraceByTurn(uid, cid, turnId);
+  // 复用 handleChat：原提问直接作为 body 重走（doc_id 丢失可接受，重试场景多为纯问答）
+  return handleChat(req, res, uid, cid, { input: userTurn.content });
 }

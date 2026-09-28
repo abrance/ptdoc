@@ -110,6 +110,14 @@ export function initSettingsPanel(opts: {
         <p class="settings-hint" id="llm-hint"></p>
         <label>Base URL<input name="llm_base_url" placeholder="https://api.deepseek.com/v1" /></label>
         <label>模型名<input name="llm_model" placeholder="deepseek-chat" /></label>
+        <label>思考强度
+          <select name="llm_thinking">
+            <option value="off">关闭</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高（默认）</option>
+          </select>
+        </label>
         <label>API Key<input name="llm_api_key" type="password" autocomplete="off" /></label>
         <div class="settings-ops"><button type="button" id="llm-save" class="btn-primary">保存大模型</button></div>
       </form>`;
@@ -222,10 +230,11 @@ export function initSettingsPanel(opts: {
 
   const fillLlm = async (): Promise<void> => {
     const res = await fetch('/api/agents/llm');
-    const p = (await res.json()) as { base_url: string; model: string; secret_configured: boolean };
+    const p = (await res.json()) as { base_url: string; model: string; thinking_level?: string; secret_configured: boolean };
     const form = document.getElementById('llm-form') as HTMLFormElement;
     (form.elements.namedItem('llm_base_url') as HTMLInputElement).value = p.base_url;
     (form.elements.namedItem('llm_model') as HTMLInputElement).value = p.model;
+    (form.elements.namedItem('llm_thinking') as HTMLSelectElement).value = p.thinking_level || 'high';
     const key = form.elements.namedItem('llm_api_key') as HTMLInputElement;
     key.value = '';
     key.placeholder = p.secret_configured ? '已配置（留空则保持原值）' : '未配置';
@@ -260,6 +269,7 @@ export function initSettingsPanel(opts: {
     const body: Record<string, unknown> = {
       base_url: (form.elements.namedItem('llm_base_url') as HTMLInputElement).value,
       model: (form.elements.namedItem('llm_model') as HTMLInputElement).value,
+      thinking_level: (form.elements.namedItem('llm_thinking') as HTMLSelectElement).value,
     };
     const key = (form.elements.namedItem('llm_api_key') as HTMLInputElement).value.trim();
     if (key) body.api_key = key;

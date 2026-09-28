@@ -205,6 +205,23 @@ function migrateToMultiUser(): void {
   }
 }
 
+function migrateAgentCapabilityColumns(): void {
+  const d = getDb();
+  for (const [table, col, def] of [
+    ['llm_profiles', 'thinking_level', 'TEXT'],
+    ['agent_turns', 'status', "TEXT NOT NULL DEFAULT 'ok'"],
+    ['agent_turns', 'error_message', 'TEXT'],
+    ['agent_turns', 'thinking', 'TEXT'],
+    ['agent_traces', 'thinking', 'TEXT'],
+  ] as const) {
+    try {
+      d.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    } catch {
+      /* 列已存在则忽略 */
+    }
+  }
+}
+
 function migrateAgentTables(): void {
   getDb().exec(`
     CREATE TABLE IF NOT EXISTS llm_profiles (
@@ -251,6 +268,9 @@ function migrateAgentTables(): void {
       content         TEXT NOT NULL,
       draft_md        TEXT,
       trace_id        TEXT,
+      status          TEXT NOT NULL DEFAULT 'ok',
+      error_message   TEXT,
+      thinking        TEXT,
       created_at      INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS agent_traces (
@@ -395,6 +415,7 @@ export function initDB(dbFile?: string): void {
   }
   migrateToMultiUser();
   migrateAgentTables();
+  migrateAgentCapabilityColumns();
   migrateArchiveSchema();
   migrateApiTokenHash();
 }
@@ -1026,6 +1047,7 @@ export interface LlmProfileRow {
   base_url: string;
   api_key_enc: string;
   model: string;
+  thinking_level: string | null;
   updated_at: number;
 }
 
@@ -1068,6 +1090,9 @@ export interface AgentTurnRow {
   content: string;
   draft_md: string | null;
   trace_id: string | null;
+  status: string;
+  error_message: string | null;
+  thinking: string | null;
   created_at: number;
 }
 
@@ -1082,6 +1107,7 @@ export interface AgentTraceRow {
   latency_ms: number | null;
   hits_json: string | null;
   spans_json: string | null;
+  thinking: string | null;
   created_at: number;
 }
 
@@ -1091,16 +1117,22 @@ export function getLlmProfile(userId: number): LlmProfileRow | undefined {
     | undefined;
 }
 
-export function upsertLlmProfile(userId: number, baseUrl: string, apiKeyEnc: string, model: string): void {
+export function upsertLlmProfile(
+  userId: number,
+  baseUrl: string,
+  apiKeyEnc: string,
+  model: string,
+  thinkingLevel?: string,
+): void {
   const now = Date.now();
   getDb()
     .prepare(
-      `INSERT INTO llm_profiles (user_id, base_url, api_key_enc, model, updated_at)
-       VALUES (?,?,?,?,?)
+      `INSERT INTO llm_profiles (user_id, base_url, api_key_enc, model, thinking_level, updated_at)
+       VALUES (?,?,?,?,?,?)
        ON CONFLICT(user_id) DO UPDATE SET base_url=excluded.base_url, api_key_enc=excluded.api_key_enc,
-         model=excluded.model, updated_at=excluded.updated_at`,
+         model=excluded.model, thinking_level=excluded.thinking_level, updated_at=excluded.updated_at`,
     )
-    .run(userId, baseUrl, apiKeyEnc, model, now);
+    .run(userId, baseUrl, apiKeyEnc, model, thinkingLevel ?? 'high', now);
 }
 
 export function getQdrantProfile(userId: number): QdrantProfileRow | undefined {
@@ -1294,14 +1326,28 @@ export function insertAgentTurn(row: {
   content: string;
   draft_md?: string | null;
   trace_id?: string | null;
+  status?: string;
+  error_message?: string | null;
+  thinking?: string | null;
 }): AgentTurnRow {
   const now = Date.now();
   const info = getDb()
     .prepare(
-      `INSERT INTO agent_turns (conversation_id, user_id, role, content, draft_md, trace_id, created_at)
-       VALUES (?,?,?,?,?,?,?)`,
+      `INSERT INTO agent_turns (conversation_id, user_id, role, content, draft_md, trace_id, status, error_message, thinking, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
-    .run(row.conversation_id, row.user_id, row.role, row.content, row.draft_md ?? null, row.trace_id ?? null, now);
+    .run(
+      row.conversation_id,
+      row.user_id,
+      row.role,
+      row.content,
+      row.draft_md ?? null,
+      row.trace_id ?? null,
+      row.status ?? 'ok',
+      row.error_message ?? null,
+      row.thinking ?? null,
+      now,
+    );
   return getDb().prepare('SELECT * FROM agent_turns WHERE id=?').get(Number(info.lastInsertRowid)) as unknown as AgentTurnRow;
 }
 
@@ -1317,11 +1363,47 @@ export function getAgentTurn(userId: number, conversationId: number, turnId: num
     .get(turnId, conversationId, userId) as unknown as AgentTurnRow | undefined;
 }
 
+/** 重试前清理：删除指定 turn（含 trace）；权限由调用方校验 */
+export function deleteAgentTurnsByIds(userId: number, conversationId: number, ids: number[]): void {
+  if (!ids.length) return;
+  getDb()
+    .prepare(
+      `DELETE FROM agent_turns WHERE user_id=? AND conversation_id=? AND id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .run(userId, conversationId, ...ids);
+}
+
+export function deleteAgentTraceByTurn(userId: number, conversationId: number, turnId: number): void {
+  getDb()
+    .prepare('DELETE FROM agent_traces WHERE user_id=? AND conversation_id=? AND turn_id=?')
+    .run(userId, conversationId, turnId);
+}
+
+/** 更新 turn 状态（失败标记 / 重试恢复）与思考文本 */
+export function updateAgentTurnResult(
+  turnId: number,
+  patch: { status?: string; error_message?: string | null; thinking?: string | null; content?: string; trace_id?: string | null },
+): void {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  for (const k of ['status', 'error_message', 'thinking', 'content', 'trace_id'] as const) {
+    if (patch[k] !== undefined) {
+      sets.push(`${k}=?`);
+      vals.push(patch[k]);
+    }
+  }
+  if (!sets.length) return;
+  vals.push(turnId);
+  getDb()
+    .prepare(`UPDATE agent_turns SET ${sets.join(', ')} WHERE id=?`)
+    .run(...(vals as string[]));
+}
+
 export function insertAgentTrace(row: AgentTraceRow): void {
   getDb()
     .prepare(
-      `INSERT INTO agent_traces (trace_id, user_id, conversation_id, turn_id, model, input_tokens, output_tokens, latency_ms, hits_json, spans_json, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO agent_traces (trace_id, user_id, conversation_id, turn_id, model, input_tokens, output_tokens, latency_ms, hits_json, spans_json, thinking, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       row.trace_id,
@@ -1334,6 +1416,7 @@ export function insertAgentTrace(row: AgentTraceRow): void {
       row.latency_ms,
       row.hits_json,
       row.spans_json,
+      row.thinking ?? null,
       row.created_at,
     );
 }
