@@ -684,11 +684,8 @@ async function generateShare(): Promise<void> {
   const md = editor.value;
   const fenceRe = /```mermaid\s*\n([\s\S]*?)```/g;
   const matches = [...md.matchAll(fenceRe)];
-  if (matches.length === 0) {
-    setStatus('没有找到 mermaid 代码块，无需转换');
-    return;
-  }
-  setStatus(`正在转换 ${matches.length} 个图表为图片并上传…`);
+  if (matches.length === 0) setStatus('未发现 mermaid 代码块，直接生成分享版…');
+  else setStatus(`正在转换 ${matches.length} 个图表为图片并上传…`);
 
   const images: Array<{ qiniu_key: string; url: string; mermaid_hash: string }> = [];
   let result = '';
@@ -789,7 +786,8 @@ async function generateShare(): Promise<void> {
 
   showShareModal(result, shareId);
   const reused = cacheHits > 0 ? `，复用缓存 ${cacheHits} 张` : '';
-  setStatus(`已生成分享版（${images.length} 张图${reused}，.md 与 .html 已上传七牛）并记录到数据库`);
+  const imgs = images.length > 0 ? `${images.length} 张图${reused}，` : '无 mermaid 图，';
+  setStatus(`已生成分享版（${imgs}.md 与 .html 已上传七牛）并记录到数据库`);
   setTimeout(() => setProgress(null), 500);
 }
 
