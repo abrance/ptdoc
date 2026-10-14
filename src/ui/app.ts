@@ -247,6 +247,8 @@ function setNav(page: NavPage): void {
     else if (document.body.classList.contains('sidebar-collapsed')) setSidebarOpen(true);
   }
   if (page === 'agent') void refreshNavConvs();
+  // 切到归档页时重新拉取归档树（上传分享 HTML / 生成分享版后切过来也能看到）
+  if (page === 'archive') void sidebarRef?.refresh();
   if (page === 'settings') void syncSettingsDots();
 }
 

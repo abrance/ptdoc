@@ -242,7 +242,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     archiveFolders = data.folders;
   };
 
-  const refresh = async (): Promise<void> => {
+  const refreshAndPaintDocs = async (): Promise<void> => {
     try {
       await refreshDraft();
       paintDocs();
@@ -258,6 +258,11 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     } catch {
       archiveTreeEl.innerHTML = '<div class="tree-empty">加载失败</div>';
     }
+  };
+
+  // 双树各自独立渲染，两棵树都刷新（归档树此前只在过滤框输入时才会画，切到归档页是空的）
+  const refresh = async (): Promise<void> => {
+    await Promise.all([refreshAndPaintDocs(), refreshAndPaintArchive()]);
   };
 
   // 搜索：有词走 /api/docs?q=（扁平结果），无词恢复树
