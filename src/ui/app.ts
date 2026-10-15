@@ -121,10 +121,13 @@ let workspaceView: WorkspaceView = 'split';
 const PREF_KEY = 'ptdoc.prefs';
 const SPLIT_MIN = 0.28;
 const SPLIT_MAX = 0.72;
+const SIDEBAR_W_MIN = 220;
+const SIDEBAR_W_MAX = 460;
 
 interface Prefs {
   view?: WorkspaceView;
   sidebar?: boolean;
+  sidebarW?: number;
   split?: number;
   toc?: boolean;
   theme?: ThemeMode;
@@ -149,6 +152,13 @@ function writePref<K extends keyof Prefs>(key: K, value: Prefs[K]): void {
 function setSplitRatio(main: HTMLElement, left: number): void {
   const l = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, left));
   main.style.gridTemplateColumns = l + 'fr 6px ' + (1 - l) + 'fr';
+}
+
+/** 侧栏宽度：写 --sidebar-w 变量，不摸 grid模板，折叠/移动端媒体查询仍能接管。*/
+function setSidebarWidth(ws: HTMLElement, w: number): number {
+  const cw = Math.min(SIDEBAR_W_MAX, Math.max(SIDEBAR_W_MIN, Math.round(w)));
+  ws.style.setProperty('--sidebar-w', cw + 'px');
+  return cw;
 }
 
 // 主题默认跟随系统；index.html 里有一段同样的预置脚本，避免首帧闪白。
@@ -309,10 +319,12 @@ function initLayoutChrome(): void {
   initNav();
   setWorkspaceView(isMobileLayout() ? 'edit' : prefs.view ?? 'split');
   setSidebarOpen(prefs.sidebar ?? !isMobileLayout());
+  const ws = document.querySelector('.workspace') as HTMLElement;
   const mainEl = document.querySelector('.workspace-main') as HTMLElement | null;
   if (mainEl && workspaceView === 'split' && !isMobileLayout() && prefs.split) {
     setSplitRatio(mainEl, prefs.split);
   }
+  if (prefs.sidebarW) setSidebarWidth(ws, prefs.sidebarW);
   if (prefs.toc) toggleToc(true);
   initMoreMenu();
   $('view-edit').addEventListener('click', () => setWorkspaceView('edit'));
@@ -344,6 +356,26 @@ function initLayoutChrome(): void {
     };
     const up = () => {
       writePref('split', Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, left)));
+      document.body.classList.remove('resizing');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+
+  const sidebarResize = $('sidebar-resize');
+  sidebarResize.addEventListener('pointerdown', (e) => {
+    if (isMobileLayout() || document.body.classList.contains('sidebar-collapsed')) return;
+    e.preventDefault();
+    const start = ws.getBoundingClientRect();
+    document.body.classList.add('resizing');
+    let w = SIDEBAR_W_MIN;
+    const move = (ev: PointerEvent) => {
+      w = setSidebarWidth(ws, ev.clientX - start.left);
+    };
+    const up = () => {
+      writePref('sidebarW', w);
       document.body.classList.remove('resizing');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
