@@ -1174,7 +1174,7 @@ body.resizing {
 .sidebar-tree {
   flex: 1;
   overflow: auto;
-  padding: 6px;
+  padding: 8px 6px;
 }
 
 .sidebar-tree .tree-root,
@@ -1185,7 +1185,15 @@ body.resizing {
 }
 
 .tree-children {
-  margin-left: 14px;
+  margin-left: 11px;
+  padding-left: 7px;
+  border-left: 1px solid var(--border);
+}
+
+/* 子级展开时缩进线淡一点，扫视层级更清晰 */
+.tree-folder:hover > .tree-folder-row + .tree-children,
+.tree-children:hover {
+  border-left-color: color-mix(in srgb, var(--border) 60%, transparent);
 }
 
 .tree-empty {
@@ -1207,10 +1215,32 @@ body.resizing {
   font-weight: 600;
   cursor: pointer;
   user-select: none;
+  transition: background-color var(--ease);
+}
+
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-folder-icon,
+.tree-doc-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+  transition: color var(--ease);
 }
 
 .tree-folder-label:hover {
   background: var(--surface);
+}
+
+.tree-folder-label:hover .tree-folder-icon {
+  color: var(--fg);
 }
 
 .tree-folder-row {
@@ -1230,10 +1260,19 @@ body.resizing {
 }
 
 .tree-caret {
-  display: inline-block;
-  width: 12px;
-  transition: transform 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
   color: var(--muted);
+  transition: transform 0.18s ease;
+}
+
+.tree-caret .icon {
+  width: 12px;
+  height: 12px;
 }
 
 .tree-folder:not(.open) > .tree-caret,
@@ -1253,20 +1292,33 @@ body.resizing {
   min-height: 32px;
   border-radius: 6px;
   cursor: pointer;
+  transition: background-color var(--ease), color var(--ease);
 }
 
 .tree-doc:hover {
   background: var(--surface);
 }
 
+.tree-doc:hover .tree-doc-icon {
+  color: var(--fg);
+}
+
 .tree-doc.current {
+  position: relative;
   background: var(--accent-soft);
   color: var(--accent);
 }
 
-.tree-doc.current .tree-label {
-  color: var(--accent);
-  font-weight: 600;
+/* 当前文档左侧强调条，比纯底色多一层层级信号 */
+.tree-doc.current::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
 }
 
 .tree-label {
@@ -1276,6 +1328,10 @@ body.resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tree-doc.current .tree-doc-icon {
+  color: var(--accent);
 }
 
 .tree-stale {
