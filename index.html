@@ -86,7 +86,6 @@
           <div class="brand"><svg class="brand-mark"><use href="#i-logo"></use></svg><span id="brand">PTDoc</span></div>
           <nav class="nav-tabs" role="tablist" aria-label="主导航">
             <button type="button" role="tab" data-nav="docs" class="active" aria-selected="true">文档</button>
-            <button type="button" role="tab" data-nav="archive" aria-selected="false">归档</button>
             <button type="button" role="tab" data-nav="agent" aria-selected="false">智能体</button>
             <button type="button" role="tab" data-nav="share" aria-selected="false">分享</button>
             <button type="button" role="tab" data-nav="settings" aria-selected="false">设置</button>
@@ -118,7 +117,7 @@
         <aside id="sidebar" class="sidebar">
           <div class="sider-page active" data-page="docs">
             <div class="sidebar-head">
-              <input id="sidebar-search" type="search" placeholder="过滤文档…" aria-label="过滤文档" />
+              <input id="sidebar-search" type="search" placeholder="过滤文档与归档…" aria-label="过滤文档与归档" />
               <button id="sidebar-new" class="icon-btn" type="button" title="新建文档" aria-label="新建文档">
                 <svg class="icon"><use href="#i-plus"></use></svg>
               </button>
@@ -127,15 +126,21 @@
               </button>
             </div>
             <nav id="sidebar-tree" class="sidebar-tree" aria-label="文档树"></nav>
-          </div>
-          <div class="sider-page" data-page="archive">
-            <div class="sidebar-head">
-              <input id="archive-search" type="search" placeholder="过滤归档…" aria-label="过滤归档" />
-              <button id="archive-new-folder" class="icon-btn" type="button" title="新建文件夹" aria-label="新建文件夹">
-                <svg class="icon"><use href="#i-plus"></use></svg>
-              </button>
-            </div>
-            <nav id="archive-tree" class="sidebar-tree" aria-label="归档树"></nav>
+            <section id="archive-section" class="archive-section">
+              <div class="archive-header">
+                <button id="archive-toggle" class="archive-toggle" type="button" aria-expanded="false" title="展开/折叠归档">
+                  <span class="tree-caret" aria-hidden="true">
+                    <svg class="icon"><use href="#i-caret"></use></svg>
+                  </span>
+                  <span class="archive-title">归档</span>
+                  <span id="archive-count" class="nav-count">0</span>
+                </button>
+                <button id="archive-new-folder" class="icon-btn" type="button" title="新建归档文件夹" aria-label="新建归档文件夹">
+                  <svg class="icon"><use href="#i-plus"></use></svg>
+                </button>
+              </div>
+              <nav id="archive-tree" class="archive-tree" aria-label="归档树"></nav>
+            </section>
           </div>
           <div class="sider-page" data-page="agent">
             <section class="nav-group">

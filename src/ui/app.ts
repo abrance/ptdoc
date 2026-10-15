@@ -220,7 +220,7 @@ function setSidebarOpen(open: boolean): void {
 // ─── Workbench 一级导航（视图/检索/场景/集成）──────────────
 // 顶栏 Tab 决定左侧 Sider 显示哪一页；检索/场景的树形导航直接住在 Sider 里，
 // 不再走右侧抽屉。切到非视图页时如果侧栏是收起的，自动展开。
-type NavPage = 'docs' | 'archive' | 'agent' | 'share' | 'settings';
+type NavPage = 'docs' | 'agent' | 'share' | 'settings';
 let navPage: NavPage = 'docs';
 
 function setNav(page: NavPage): void {
@@ -232,23 +232,21 @@ function setNav(page: NavPage): void {
     b.setAttribute('aria-selected', String(on));
   });
   // Sider 分页 + 主界面双切（Workbench：每个 Tab = Sider 导航 + 主界面）
+  // 归档并入文档页（侧栏底部折叠区），不再有独立归档 Tab
   document.querySelectorAll<HTMLElement>('.sider-page').forEach((p) => {
     p.classList.toggle('active', p.dataset.page === page);
   });
   document.querySelectorAll<HTMLElement>('.main-page').forEach((m) => {
-    m.classList.toggle('active', m.dataset.main === page || (page === 'archive' && m.dataset.main === 'docs'));
+    m.classList.toggle('active', m.dataset.main === page);
   });
-  // 归档 Tab 复用文档工作台：视图切换按钮仅在文档/归档页有意义
-  // 文档工作台工具条（视图切换+文档操作）仅文档/归档页有意义
+  // 文档工作台工具条（视图切换+文档操作）仅文档页有意义
   const toolbar = document.querySelector('.workspace-toolbar') as HTMLElement | null;
-  if (toolbar) toolbar.style.display = page === 'docs' || page === 'archive' ? '' : 'none';
+  if (toolbar) toolbar.style.display = page === 'docs' ? '' : 'none';
   if (page !== 'docs') {
     if (isMobileLayout()) setSidebarOpen(true);
     else if (document.body.classList.contains('sidebar-collapsed')) setSidebarOpen(true);
   }
   if (page === 'agent') void refreshNavConvs();
-  // 切到归档页时重新拉取归档树（上传分享 HTML / 生成分享版后切过来也能看到）
-  if (page === 'archive') void sidebarRef?.refresh();
   if (page === 'settings') void syncSettingsDots();
 }
 

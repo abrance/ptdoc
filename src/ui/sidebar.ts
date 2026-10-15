@@ -183,7 +183,9 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
 
   const sidebarEl = document.getElementById('sidebar') as HTMLElement;
   const archiveTreeEl = document.getElementById('archive-tree') as HTMLElement;
-  const archiveSearchEl = document.getElementById('archive-search') as HTMLInputElement;
+  const archiveSectionEl = document.getElementById('archive-section') as HTMLElement;
+  const archiveToggleEl = document.getElementById('archive-toggle') as HTMLButtonElement;
+  const archiveCountEl = document.getElementById('archive-count') as HTMLElement;
   const archiveNewBtn = document.getElementById('archive-new-folder') as HTMLButtonElement;
 
   let mode: SidebarMode = 'draft';
@@ -226,6 +228,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   };
 
   const paintArchive = (): void => {
+    archiveCountEl.textContent = String(archiveEntries.length);
     paintTree(
       archiveTreeEl,
       toArchiveDocs(archiveEntries),
@@ -233,6 +236,19 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       '<div class="tree-empty">还没有归档。生成分享版并上传 HTML 后会出现在这里。</div>',
       'archive',
     );
+  };
+
+  /** 过滤态扁平渲染：搜索结果不重建文件夹层级，直接平铺。*/
+  const paintFlat = (target: HTMLElement, docs: TreeDoc[], flatMode: SidebarMode, emptyHtml: string): void => {
+    target.innerHTML = '';
+    if (docs.length === 0) {
+      target.innerHTML = emptyHtml;
+      return;
+    }
+    const ul = document.createElement('ul');
+    ul.className = 'tree-root';
+    renderFlat(docs, opts.getCurrentKey(), flatMode).forEach((li) => ul.appendChild(li));
+    target.appendChild(ul);
   };
 
   const refreshDraft = async (): Promise<void> => {
@@ -272,21 +288,50 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     await Promise.all([refreshAndPaintDocs(), refreshAndPaintArchive()]);
   };
 
-  // 搜索：有词走 /api/docs?q=（扁平结果），无词恢复树
+  // ─── 归档折叠区：默认折叠，状态记忆在 localStorage ──────────
+  const ARCHIVE_OPEN_KEY = 'ptdoc.sider-archive-open';
+  let archiveOpen = false;
+  try {
+    archiveOpen = localStorage.getItem(ARCHIVE_OPEN_KEY) === '1';
+  } catch {
+    /* 隐私模式禁用 localStorage：保持默认折叠 */
+  }
+  let archiveForceOpen = false; // 过滤词命中归档时临时展开，清词后恢复
+  const applyArchiveOpen = (): void => {
+    const open = archiveOpen || archiveForceOpen;
+    archiveSectionEl.classList.toggle('collapsed', !open);
+    archiveToggleEl.setAttribute('aria-expanded', String(open));
+  };
+  applyArchiveOpen();
+  archiveToggleEl.addEventListener('click', () => {
+    archiveOpen = !archiveOpen;
+    try {
+      localStorage.setItem(ARCHIVE_OPEN_KEY, archiveOpen ? '1' : '0');
+    } catch {
+      /* 隐私模式仅本次生效 */
+    }
+    applyArchiveOpen();
+  });
+
+  // 搜索：单过滤框同时过滤文档与归档（并行两个接口，各按扁平结果渲染）
   searchEl.addEventListener('input', async () => {
     const q = searchEl.value.trim();
+    archiveForceOpen = Boolean(q);
+    applyArchiveOpen();
     if (!q) {
       paintDocs();
+      paintArchive();
       return;
     }
     try {
-      const res = await fetch('/api/docs?q=' + encodeURIComponent(q));
-      const docs = (await res.json()) as SidebarDoc[];
-      treeEl.innerHTML = '';
-      const ul = document.createElement('ul');
-      ul.className = 'tree-root';
-      renderFlat(toDraftDocs(docs), opts.getCurrentKey(), 'draft').forEach((li) => ul.appendChild(li));
-      treeEl.appendChild(ul);
+      const [docsRes, archiveRes] = await Promise.all([
+        fetch('/api/docs?q=' + encodeURIComponent(q)),
+        fetch('/api/archive?q=' + encodeURIComponent(q)),
+      ]);
+      const docs = (await docsRes.json()) as SidebarDoc[];
+      const data = (await archiveRes.json()) as { entries: ArchiveEntry[]; folders: ArchiveFolder[] };
+      paintFlat(treeEl, toDraftDocs(docs), 'draft', '<div class="tree-empty">没有匹配的文档</div>');
+      paintFlat(archiveTreeEl, toArchiveDocs(data.entries), 'archive', '<div class="tree-empty">没有匹配的归档</div>');
     } catch {
       /* 忽略搜索失败 */
     }
@@ -294,27 +339,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
 
   newBtn.addEventListener('click', () => void createDoc());
 
-  // ─── 归档树（Sider 归档页）─────────────────────────
-  archiveSearchEl.addEventListener('input', async () => {
-    const q = archiveSearchEl.value.trim();
-    if (!q) {
-      paintArchive();
-      return;
-    }
-    try {
-      const res = await fetch('/api/archive?q=' + encodeURIComponent(q));
-      const data = (await res.json()) as { entries: ArchiveEntry[]; folders: ArchiveFolder[] };
-      paintTree(
-        archiveTreeEl,
-        toArchiveDocs(data.entries),
-        data.folders.map((f) => f.path),
-        '<div class="tree-empty">没有匹配的归档</div>',
-        'archive',
-      );
-    } catch {
-      /* 忽略搜索失败 */
-    }
-  });
+  // ─── 归档折叠区（文档 tab 底部）─────────────────────────
   archiveNewBtn.addEventListener('click', () => void createFolder());
 
   // ─── 批量导入文件夹 ──────────────────────────────────
