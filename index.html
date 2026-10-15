@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PTDoc</title>
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -60,6 +65,14 @@
         <circle cx="12" cy="12" r="9" />
         <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
       </symbol>
+      <!-- 品牌 logo：ptdoc 星光折角文档（pretty document） -->
+      <symbol id="i-logo" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-linejoin="round">
+        <path d="M28 24 L50 24 L66 40 L66 70 Q66 72.5 63.5 72.5 L30.5 72.5 Q28 72.5 28 70 Z" stroke-width="3.5" />
+        <rect x="34" y="44" width="18" height="5" rx="2.5" fill="currentColor" stroke="none" />
+        <rect x="34" y="55" width="24" height="4" rx="2" fill="currentColor" stroke="none" opacity="0.55" />
+        <rect x="34" y="64" width="15" height="4" rx="2" fill="currentColor" stroke="none" opacity="0.35" />
+        <path d="M59 12 Q60.5 21 68 22.5 Q60.5 24 59 33 Q57.5 24 50 22.5 Q57.5 21 59 12 Z" fill="currentColor" stroke="none" />
+      </symbol>
     </svg>
     <div class="app">
       <header class="topbar">
@@ -67,7 +80,7 @@
           <button id="sidebar-toggle" class="icon-btn" type="button" title="折叠侧边栏" aria-label="折叠侧边栏" aria-controls="sidebar" aria-expanded="true">
             <svg class="icon"><use href="#i-sidebar"></use></svg>
           </button>
-          <div class="brand" id="brand">PTDoc</div>
+          <div class="brand"><svg class="brand-mark"><use href="#i-logo"></use></svg><span id="brand">PTDoc</span></div>
           <nav class="nav-tabs" role="tablist" aria-label="主导航">
             <button type="button" role="tab" data-nav="docs" class="active" aria-selected="true">文档</button>
             <button type="button" role="tab" data-nav="archive" aria-selected="false">归档</button>

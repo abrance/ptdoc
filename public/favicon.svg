@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="ptdoc favicon tile">
+  <defs>
+    <linearGradient id="av" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="100" y2="100">
+      <stop offset="0" stop-color="#6D28D9"/>
+      <stop offset="1" stop-color="#DB2777"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="18" fill="url(#av)"/>
+  <g transform="translate(19,17) scale(0.62)" stroke="#FAF9FC" stroke-width="5.6" stroke-linejoin="round">
+    <path d="M28 22 L52 22 L70 40 L70 74 Q70 77 67 77 L31 77 Q28 77 28 74 Z"
+          fill="none"/>
+    <rect x="35" y="44" width="18" height="5" rx="2.5" fill="#FAF9FC" stroke="none"/>
+    <rect x="35" y="55" width="24" height="4" rx="2" fill="#FAF9FC" stroke="none" opacity="0.6"/>
+    <rect x="35" y="64" width="15" height="4" rx="2" fill="#FAF9FC" stroke="none" opacity="0.4"/>
+    <path d="M61 16 Q62.5 25 70 26.5 Q62.5 28 61 37 Q59.5 28 52 26.5 Q59.5 25 61 16 Z" fill="#FAF9FC" stroke="none"/>
+  </g>
+</svg>

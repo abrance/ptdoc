@@ -1,5 +1,16 @@
 # PTDoc
 
+<div align="center">
+  <a href="https://github.com/abrance/ptdoc">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/logo.png">
+      <img src=".github/logo.png" alt="ptdoc —— pretty document" width="340">
+    </picture>
+  </a>
+
+  <p><em>pretty document · 让每份文档都体面地展示</em></p>
+</div>
+
 多用户 Markdown 文档平台：每人独立工作区，整合 **Markdown 渲染 + Mermaid 图表 + 七牛云图床**，用于编写与展示 `.md` 文档。
 
 定位是一个「**胶水代码 + 你自己的业务逻辑 + 依赖库**」的组合，方便你逐步往里塞自己的需求，而不是被某个重框架绑死。

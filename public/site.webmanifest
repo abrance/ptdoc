@@ -1,0 +1,14 @@
+{
+  "name": "PTDoc",
+  "short_name": "PTDoc",
+  "description": "多用户 Markdown 文档平台",
+  "start_url": "/",
+  "display": "browser",
+  "background_color": "#FAF9FC",
+  "theme_color": "#6D28D9",
+  "icons": [
+    { "src": "/favicon-32.png", "sizes": "32x32", "type": "image/png" },
+    { "src": "/favicon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/favicon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
