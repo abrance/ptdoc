@@ -127,6 +127,7 @@ function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIE
       : `<button class="tree-op" data-op="rename" title="重命名" aria-label="重命名"><svg class="icon"><use href="#i-pencil"></use></svg></button>
          <button class="tree-op" data-op="delete" title="删除" aria-label="删除"><svg class="icon"><use href="#i-trash"></use></svg></button>`;
   li.innerHTML = `
+    <svg class="icon tree-doc-icon"><use href="#i-doc"></use></svg>
     <span class="tree-label" title="${esc(mode === 'archive' ? doc.path : doc.doc_key)}">${esc(doc.title)}</span>
     ${stale}
     ${qdrant}
@@ -149,7 +150,13 @@ function renderFolder(folder: FolderNode, currentKey: string, mode: SidebarMode)
       : '';
   li.innerHTML = `
     <div class="tree-folder-row">
-      <span class="tree-folder-label"><span class="tree-caret">▾</span>${esc(folder.name)}</span>
+      <span class="tree-folder-label">
+        <span class="tree-caret" aria-hidden="true">
+          <svg class="icon"><use href="#i-caret"></use></svg>
+        </span>
+        <svg class="icon tree-folder-icon"><use href="#i-folder"></use></svg>
+        <span class="tree-name">${esc(folder.name)}</span>
+      </span>
       ${folderOps}
     </div>`;
   const ul = document.createElement('ul');
