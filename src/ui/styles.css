@@ -845,13 +845,39 @@ button.linkish {
 
 .workspace {
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) 6px minmax(0, 1fr);
   min-height: 0;
   position: relative;
 }
 
 body.sidebar-collapsed .workspace {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 0 0 minmax(0, 1fr);
+}
+
+/* 侧栏宽度拖拽手柄：1px 视觉线 + 6px 命中区，鼠标样式与 hover 跟 split-handle 一致 */
+.sidebar-resize {
+  position: relative;
+  cursor: col-resize;
+}
+
+.sidebar-resize::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  transition: background var(--ease);
+}
+
+.sidebar-resize:hover::before,
+body.resizing .sidebar-resize::before {
+  background: var(--accent);
+}
+
+body.sidebar-collapsed .sidebar-resize {
+  display: none;
 }
 
 body.sidebar-collapsed .sidebar {
@@ -1369,6 +1395,10 @@ body.resizing {
   background: var(--surface);
 }
 
+.tree-doc:hover .tree-label {
+  color: var(--fg);
+}
+
 .tree-doc:hover .tree-doc-icon {
   color: var(--fg);
 }
@@ -1376,6 +1406,11 @@ body.resizing {
 .tree-doc.current {
   position: relative;
   background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 当前档标题用强调色，普通档用次级色：与文件夹（加粗+前景色）拉开层级 */
+.tree-doc.current .tree-label {
   color: var(--accent);
 }
 
@@ -1395,6 +1430,8 @@ body.resizing {
   flex: 1;
   min-width: 0;
   font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
