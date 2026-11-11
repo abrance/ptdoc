@@ -69,7 +69,10 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
     const isArchiveApi = /^\/(api\/archive|api\/share\/\d+|api\/docs\/)/.test(url);
     if (!isPublic && !isArchiveApi) return next();
     // 只接管自己负责的路径，其余交回后续中间件
-    if (isArchiveApi && !/\/archive(\/|$|\?)|^\/api\/archive(\?|$)|^\/api\/share\/\d+(\?|$)/.test(url)) {
+    if (
+      isArchiveApi &&
+      !/\/archive(-status)?(\/|$|\?)|^\/api\/archive(\?|$)|^\/api\/share\/\d+(\?|$)/.test(url)
+    ) {
       return next();
     }
 
