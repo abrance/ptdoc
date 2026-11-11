@@ -16,6 +16,8 @@ import {
 } from './db.ts';
 import { archiveDoc, getArchiveStorage, LOCAL_ARCHIVE_PREFIX, readLocalArchiveObject } from './archive.ts';
 import { buildShareHtmlDoc } from '../core/share-html.ts';
+import { optionalUserStorage } from './storage.ts';
+import { resignPrivateUrls } from './qiniu-uploader.ts';
 import { requireUser } from './auth.ts';
 import { HttpError, readJson, sendJson } from './http.ts';
 import type { ArtifactRow } from './db.ts';
@@ -40,6 +42,12 @@ function sendHtml(res: any, status: number, html: string, noStore = true): void 
 
 function versionUrl(token: string, a: ArtifactRow): string {
   return a.status === 'active' ? `/a/${token}` : `/a/${token}/v/${a.version}`;
+}
+
+/** 私有空间下库里的图片链接是上传当时签的，输出前现签一遍（公开空间原样返回）。 */
+function freshUrls(userId: number, text: string): string {
+  const cfg = optionalUserStorage(userId);
+  return cfg ? resignPrivateUrls(text, cfg) : text;
 }
 
 function toPublicArtifact(a: ArtifactRow, token: string) {
@@ -106,7 +114,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         if (!doc || doc.user_id !== user.id) return sendJson(res, 404, { error: 'Not Found' });
         const art = getArtifactByVersion(doc.user_id, doc.doc_key, Number(versionMatch[2]));
         if (!art) return sendJson(res, 404, { error: 'Not Found' });
-        return sendHtml(res, 200, buildShareHtmlDoc(art.share_md, doc.title), false);
+        return sendHtml(res, 200, buildShareHtmlDoc(freshUrls(doc.user_id, art.share_md), doc.title), false);
       }
 
       const mdMatch = url.match(/^\/a\/([A-Za-z0-9_-]+)\/md(?:\?(.*))?$/);
@@ -123,7 +131,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
           const name = `${doc.doc_key}-v${art.version}.md`.replace(/[^\w.\-]/g, '_');
           res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
         }
-        res.end(method === 'HEAD' ? undefined : art.share_md);
+        res.end(method === 'HEAD' ? undefined : freshUrls(doc.user_id, art.share_md));
         return;
       }
 
@@ -133,7 +141,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         if (!doc) return sendJson(res, 404, { error: 'Not Found' });
         const art = getActiveArtifact(doc.user_id, doc.doc_key);
         if (!art) return sendJson(res, 410, { error: '该归档已删除' });
-        return sendHtml(res, 200, buildShareHtmlDoc(art.share_md, doc.title));
+        return sendHtml(res, 200, buildShareHtmlDoc(freshUrls(doc.user_id, art.share_md), doc.title));
       }
 
       // ─── 登录态接口 ───

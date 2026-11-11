@@ -114,19 +114,28 @@ export async function verifyConnectivity(cfg: QiniuConfig): Promise<void> {
 }
 
 export function requireUserStorage(userId: number): QiniuConfig {
-  const row = getStorageProfile(userId);
-  if (!row || !row.verified_at) {
-    throw new HttpError(400, '请先完成对象存储配置');
+  const cfg = optionalUserStorage(userId);
+  if (!cfg) throw new HttpError(400, '请先完成对象存储配置');
+  return cfg;
+}
+
+/** 读路径用：未配置/密钥损坏都只是不重签，不能把页面弄挂。 */
+export function optionalUserStorage(userId: number): QiniuConfig | undefined {
+  try {
+    const row = getStorageProfile(userId);
+    if (!row || !row.verified_at) return undefined;
+    return {
+      accessKey: row.access_key,
+      secretKey: decryptSecret(row.secret_key_enc),
+      bucket: row.bucket,
+      domain: row.domain,
+      zone: (isQiniuZone(row.zone) ? row.zone : 'Zone_z0') as QiniuZone,
+      privateBucket: !!row.private_bucket,
+      urlTtl: row.url_ttl || 3600,
+    };
+  } catch {
+    return undefined;
   }
-  return {
-    accessKey: row.access_key,
-    secretKey: decryptSecret(row.secret_key_enc),
-    bucket: row.bucket,
-    domain: row.domain,
-    zone: (isQiniuZone(row.zone) ? row.zone : 'Zone_z0') as QiniuZone,
-    privateBucket: !!row.private_bucket,
-    urlTtl: row.url_ttl || 3600,
-  };
 }
 
 export async function saveVerifiedProfile(userId: number, cfg: QiniuConfig): Promise<StoragePublic> {
