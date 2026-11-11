@@ -1206,15 +1206,20 @@ body.sidebar-collapsed .sidebar {
   cursor: progress;
 }
 
+/* 归档结果条：作为工作区下方的流式一行，不用 fixed，避免盖住预览内容 */
+/* 归档结果条：工作区下方的一行，随工作区高度自适应，不盖住预览 */
+.workspace-page > .workspace-main {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
 .archive-result {
-  position: fixed;
-  right: 16px;
-  bottom: calc(var(--statusbar-h) + 12px);
-  z-index: var(--z-sticky);
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: min(560px, calc(100vw - 32px));
+  margin: 0 12px 10px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

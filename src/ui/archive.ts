@@ -83,14 +83,39 @@ async function readJson<T>(res: Response): Promise<T & { error?: string }> {
 async function copyText(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
-    showToast('已复制链接：' + text, 'success');
-  } catch (e) {
-    showToast('复制失败：' + (e as Error).message, 'error');
+  } catch {
+    // 文档失焦 / 非安全上下文时 Clipboard API 会被拒，退回 execCommand
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    if (!ok) {
+      showToast('复制失败：剪贴板被拒绝，请手动复制 ' + text, 'error');
+      return;
+    }
   }
+  showToast('已复制链接：' + text, 'success');
 }
 
 // ─── 文档页工具条：三态徽标 + 归档 / 重新归档 / 复制链接 ──────────
-let toolbarStatus: ArchiveStatus = { stale: false, version: 0, updated_at: null, token: null };
+let toolbarStatus: ArchiveStatus = { stale: false, version: -1, updated_at: null, token: null };
+
+/** 切换到另一篇文档时调用：上一个 version 不能当作本篇的已知状态。 */
+export function markArchiveStatusUnknown(): void {
+  statusSeq++;
+  toolbarStatus = { stale: false, version: -1, updated_at: null, token: null };
+  paintToolbar();
+}
 let statusSeq = 0;
 let busy = false;
 let getRef: () => string | null = () => null;
@@ -126,12 +151,13 @@ function setBusy(on: boolean): void {
 
 /**
  * 刷新当前文档的归档状态。
- * 未归档的文档不会因为继续编辑而变成别的状态，所以只在已归档后再轮询，省掉每次自动保存的一次请求。
+ * version === 0 表示确定未归档过，继续编辑不会改变状态，所以非强制调用直接跳过；
+ * version === -1 表示当前文档状态未知（刚切换过来），必须查一次。
  */
 export async function refreshArchiveStatus(opts?: { force?: boolean }): Promise<void> {
   const ref = getRef();
   if (!ref) return;
-  if (!opts?.force && toolbarStatus.version <= 0) return;
+  if (!opts?.force && toolbarStatus.version === 0) return;
   const seq = ++statusSeq;
   try {
     const res = await fetch(`/api/docs/${encodeURIComponent(ref)}/archive-status`);
@@ -268,6 +294,7 @@ function opsHtml(item: ArchiveItem): string {
         item.history_count ? ' (' + item.history_count + ')' : ''
       }">历史${item.history_count ? ' (' + item.history_count + ')' : ''}</button>
       <button data-op="archive" type="button">重新归档</button>
+      <button data-op="purge" type="button" class="is-danger">删除</button>
     </span>`;
 }
 
@@ -379,7 +406,7 @@ async function reArchive(ref: string): Promise<void> {
 
 async function purgeArtifact(id: number, version: number): Promise<void> {
   const ok = await askConfirm(
-    `会同时删除对象存储中的 md / html 文件，删除后无法恢复，链接立刻失效。此操作不可撤销。`,
+    '会同时删除对象存储中的 md / html 文件，删除后无法恢复。此操作不可撤销。',
     { title: `彻底删除 v${version}？`, confirmLabel: '彻底删除', danger: true },
   );
   if (!ok) return;
@@ -390,6 +417,40 @@ async function purgeArtifact(id: number, version: number): Promise<void> {
     showToast(`已彻底删除 v${version}`, 'success');
     void refreshArchiveList(($('archive-search') as HTMLInputElement).value.trim());
     void refreshArchiveStatus({ force: true });
+  } catch (e) {
+    showToast('删除失败：' + (e as Error).message, 'error');
+  }
+}
+
+/** 删掉当前生效的归档：文档回到未归档，列表行消失。 */
+async function purgeActive(docId: number, docKey: string): Promise<void> {
+  let current: Artifact | null = null;
+  try {
+    const res = await fetch(`/api/docs/${docId}/archive`);
+    const data = await readJson<ArchiveDetail>(res);
+    if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    current = data.current;
+  } catch (e) {
+    showToast('读取归档失败：' + (e as Error).message, 'error');
+    return;
+  }
+  if (!current) {
+    void refreshArchiveList(($('archive-search') as HTMLInputElement).value.trim());
+    return;
+  }
+  const ok = await askConfirm(
+    '会同时删除对象存储中的 md / html 文件，删除后无法恢复，公开链接立刻失效；此文档回到「未归档」。',
+    { title: `彻底删除 v${current.version}？`, confirmLabel: '彻底删除', danger: true },
+  );
+  if (!ok) return;
+  try {
+    const res = await fetch(`/api/share/${current.id}?purge=1`, { method: 'DELETE' });
+    const data = await readJson<{ ok: boolean }>(res);
+    if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    showToast('已彻底删除归档', 'success');
+    // 当前打开的很可能就是这篇，直接强制刷新一次徽标
+    void refreshArchiveStatus({ force: true });
+    void refreshArchiveList(($('archive-search') as HTMLInputElement).value.trim());
   } catch (e) {
     showToast('删除失败：' + (e as Error).message, 'error');
   }
@@ -432,7 +493,8 @@ export function initArchivePage(opts: PageOpts): void {
     const docKey = row.dataset.key || '';
     if (op === 'open') pageOpts.openDoc(docId);
     else if (op === 'copy') void copyText(absolute(row.dataset.token ? '/a/' + row.dataset.token : ''));
-    else if (op === 'archive') void reArchive(docKey || String(docId));
+    else if (op === 'archive') void reArchive(String(docId));
+    else if (op === 'purge') void purgeActive(docId, docKey);
     else if (op === 'history') {
       const box = row.querySelector('.ar-history') as HTMLElement;
       const open = box.hidden;

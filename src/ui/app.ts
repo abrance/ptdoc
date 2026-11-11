@@ -14,7 +14,13 @@ import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
 import { askConfirm, askText } from './dialog';
 import { showToast } from './toast';
-import { initArchivePage, initArchiveToolbar, refreshArchiveList, refreshArchiveStatus } from './archive';
+import {
+  initArchivePage,
+  initArchiveToolbar,
+  markArchiveStatusUnknown,
+  refreshArchiveList,
+  refreshArchiveStatus,
+} from './archive';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -568,6 +574,9 @@ function loadContent(docKey: string, filename: string, content: string): void {
   editor.value = content;
   currentDocKey = docKey;
   currentFilename = filename;
+  // 新文档的 id 要等保存回来才知道，先置空，避免拿上一篇的 id 去查归档状态
+  currentDocId = null;
+  markArchiveStatusUnknown();
   render();
   syncChrome();
   saveCurrentDoc();
@@ -1214,7 +1223,15 @@ void startGate((user: SessionUser) => {
     },
     showDocs: () => setNav('docs'),
   });
-  initArchiveToolbar({ getRef: () => currentDocKey || null });
+  initArchiveToolbar({
+    // 优先用数字 id：doc_key 可能带路径分隔符（导入文件夹），数字 id 是唯一稳定的引用。
+    getRef: () =>
+      currentDocId != null
+        ? String(currentDocId)
+        : currentDocKey && !currentDocKey.includes('/')
+          ? currentDocKey
+          : null,
+  });
   for (const btn of document.querySelectorAll('.share-media-btn, #media')) {
     btn.addEventListener('click', () => mediaPanel.toggle());
   }
