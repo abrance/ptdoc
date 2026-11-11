@@ -121,7 +121,7 @@ test('FR-19 存量迁移：5 文档 12 shares → 每文档 1 条 active、版�
   const idx = d.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('ux_shares_active','ux_docs_archive_token')").all() as Array<{ name: string }>;
   assert.equal(idx.length, 2, '唯一索引应已创建');
   const ver = d.prepare('PRAGMA user_version').get() as { user_version: number };
-  assert.equal(ver.user_version, 7);
+  assert.equal(ver.user_version, 8, '归档迁移(7)之后还应跑到快照版本迁移(8)');
 
   // 重复启动不重复迁移：版本号不被重新编号，也不再产生备份
   const before = d.prepare('SELECT id, version, status FROM shares ORDER BY id').all();
@@ -132,7 +132,7 @@ test('FR-19 存量迁移：5 文档 12 shares → 每文档 1 条 active、版�
   const after = d2.prepare('SELECT id, version, status FROM shares ORDER BY id').all();
   assert.deepEqual(after, before, '重复启动不应改动已有数据');
   const baks = readdirSync(dir).filter((f) => f.includes('.bak-'));
-  assert.equal(baks.length, 1, '只应备份一次');
+  assert.equal(baks.length, 2, '归档迁移(7)与快照迁移(8)各备份一次，重复启动不再备份');
   d2.close();
   closeDB();
 });

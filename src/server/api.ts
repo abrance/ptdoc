@@ -16,6 +16,11 @@ import {
   deleteDoc,
   createSnapshot,
   listSnapshots,
+  listVersions,
+  getVersion,
+  getRetention,
+  setRetention,
+  resolveDocRef,
   restoreSnapshot,
   deleteSnapshot,
   insertShare,
@@ -51,6 +56,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       !url.startsWith('/api/mermaid-cache') &&
       !url.startsWith('/api/media') &&
       !url.startsWith('/api/storage') &&
+      !url.startsWith('/api/settings') &&
       !url.startsWith('/api/archive') &&
       !url.startsWith('/s/')
     )
@@ -138,6 +144,66 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       const snapDelMatch = url.match(/^\/api\/docs\/(\d+)\/snapshots\/(\d+)$/);
       if (snapDelMatch && req.method === 'DELETE') {
         return sendJson(res, 200, deleteSnapshot(uid, Number(snapDelMatch[2])));
+      }
+
+      // ─── 版本面板（FR-22）: /api/docs/:id/versions*，:id 接受数字 id 或 URL 转义后的 doc_key ───
+      const versionRestoreMatch = url.match(/^\/api\/docs\/([^/]+)\/versions\/(\d+)\/restore$/);
+      if (versionRestoreMatch && req.method === 'POST') {
+        const doc = resolveDocRef(uid, versionRestoreMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        return sendJson(res, 200, restoreSnapshot(uid, doc.id, Number(versionRestoreMatch[2])));
+      }
+      const versionOneMatch = url.match(/^\/api\/docs\/([^/]+)\/versions\/(\d+)$/);
+      if (versionOneMatch) {
+        const doc = resolveDocRef(uid, versionOneMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        const vid = Number(versionOneMatch[2]);
+        if (req.method === 'GET') {
+          const v = getVersion(uid, doc.id, vid);
+          if (!v) throw new HttpError(404, '版本不存在');
+          return sendJson(res, 200, {
+            id: v.id,
+            kind: v.kind,
+            label: v.label,
+            content: v.content,
+            size: v.size,
+            sha256: v.content_sha256,
+            created_at: v.created_at,
+          });
+        }
+        if (req.method === 'DELETE') return sendJson(res, 200, deleteSnapshot(uid, vid));
+      }
+      const versionsMatch = url.match(/^\/api\/docs\/([^/]+)\/versions(?:\?(.*))?$/);
+      if (versionsMatch) {
+        const doc = resolveDocRef(uid, versionsMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        if (req.method === 'GET') {
+          const q = new URLSearchParams(versionsMatch[2] || '');
+          const kind = q.get('kind');
+          return sendJson(
+            res,
+            200,
+            listVersions(uid, doc.id, {
+              limit: Number(q.get('limit') || 50),
+              cursor: q.get('cursor') ? Number(q.get('cursor')) : undefined,
+              kind: kind === 'auto' || kind === 'manual' ? kind : undefined,
+            }),
+          );
+        }
+        if (req.method === 'POST') {
+          const b = await readJson(req).catch(() => ({}) as any);
+          return sendJson(res, 200, createSnapshot(uid, doc.id, b?.label));
+        }
+      }
+
+      // ─── 留存策略（FR-23）─────────────────────────────────
+      if (/^\/api\/settings\/retention(?:\?.*)?$/.test(url)) {
+        if (req.method === 'GET') return sendJson(res, 200, getRetention(uid));
+        if (req.method === 'PUT') {
+          const b = await readJson(req);
+          if (b == null || typeof b !== 'object') throw new HttpError(400, '请求体不是对象');
+          return sendJson(res, 200, setRetention(uid, b));
+        }
       }
 
       if (url === '/api/docs' && req.method === 'POST') {
