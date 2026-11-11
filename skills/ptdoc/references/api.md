@@ -56,6 +56,10 @@
 | POST | `/api/docs/:id/archive-path` | ✅ | `{archive_path}`；需该文档已有一个带 `html_url` 的分享，否则 400 `文档尚未归档` | `{ok:true}` | `api.ts:111` | ✅（含错误分支） |
 | POST | `/api/docs/:id/qdrant-sync` | ✅ | — | 同步结果；文档未归档 400 | `api.ts:116` | ✅（错误分支） |
 
+**已知限制**：`doc_key` 当路径参数用时必须 URL 转义（`ops/a.md` → `ops%2Fa.md`）。裸斜杠不
+会被当作键：`GET /api/docs/ops/a.md/archive` 会按前缀落到文档列表路由，返回 200 的文档列表
+（静默错结果，而不是 404）。服务端只保证 `%2F` 形式与非法转义回退可解析，不改路由行为。
+
 `DocSummary` = `{id, doc_key, title, filename, updated_at, last_opened_at}`；
 `DocRow` 再加 `user_id, content, created_at, archive_path, qdrant_sync_share_id, qdrant_synced_at`。
 时间都是毫秒时间戳。`/api/docs/:id/qdrant-sync` 的成功返回依赖 Qdrant 配置，本机未配，
