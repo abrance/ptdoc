@@ -250,6 +250,16 @@ ptdocctl --url ... --token ... search <keyword>
 - **源码编译**：`make ptdocctl-install`（需要 Go ≥ 1.21）→ `/usr/local/bin/ptdocctl`；
 - **本地打包**：`make ptdocctl` → `dist/ptdocctl/`（与 CI 产物一致）。
 
+## 给智能体用的 skill 物料
+
+仓库里内置了 PTDoc 的 skill 物料（`skills/ptdoc/`），供智能体或脚本直接照着抄，跟着代码版本走：
+
+- `skills/ptdoc/SKILL.md` —— 入口：什么时候用 CLI、什么时候用 REST，认证与 Token 规则，常任务的可复制代码块（列/读/建/改/删/搜/同步/快照回滚/分享/归档），以及常见错误对照表。
+- `skills/ptdoc/references/api.md` —— 全量 REST 端点矩阵（方法 / 路径 / 认证 / 入参 / 返回 / 源码行号），标注哪些接口在隔离实例上实跑过、哪些标了「未实测」及原因。
+- `skills/ptdoc/references/ptdocctl.md` —— `ptdocctl` 子命令、实测行为（doc_key 规则、原地更新、幂等重跑）与已知限制。
+
+取用方式：把 `skills/ptdoc/` 整个目录放进你的技能目录（或直接把 `SKILL.md` 交给智能体当上下文）；Token 一律通过环境变量 `PTDOC_TOKEN` 传入，不要写进仓库。这里的描述与 `src/server/*.ts` 的接口实现一一对应，改接口时请同步更新这三份文件。
+
 ## 如何扩展
 
 - **改图表配色**：编辑 `src/core/mermaid.ts` 的 `DIAGRAM_THEME`（背景/文字/线条/强调色等）。
