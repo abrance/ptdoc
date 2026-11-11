@@ -129,10 +129,17 @@ export async function testQiniuBucket(config: QiniuConfig): Promise<void> {
   await new Promise<void>((resolve) => bucketManager.delete(config.bucket, key, () => resolve()));
 }
 
-function makePrivateUrl(baseUrl: string, accessKey: string, secretKey: string, ttl: number): string {
-  const deadline = Math.floor(Date.now() / 1000) + ttl;
+export function makePrivateUrl(
+  baseUrl: string,
+  accessKey: string,
+  secretKey: string,
+  ttl: number,
+  nowMs = Date.now(),
+): string {
+  const deadline = Math.floor(nowMs / 1000) + ttl;
   const toSign = `${baseUrl}?e=${deadline}`;
   const sign = createHmac('sha1', secretKey).update(toSign).digest('base64');
   const safe = sign.replace(/\+/g, '-').replace(/\//g, '_');
-  return `${toSign}&token=${safe}:${accessKey}`;
+  // token 格式必须是 <AccessKey>:<Sign>，反过来七牛一律 401（与 SDK privateDownloadUrl 一致）
+  return `${toSign}&token=${accessKey}:${safe}`;
 }
