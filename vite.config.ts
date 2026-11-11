@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import { uploadMiddleware } from './src/server/upload-api';
 import { apiMiddleware } from './src/server/api';
+import { archiveApiMiddleware } from './src/server/archive-api';
 import { authApiMiddleware } from './src/server/auth-api';
 import { initDB } from './src/server/db';
 import { loadServerEnv } from './src/server/env';
@@ -41,6 +42,7 @@ export default defineConfig(({ mode, command }) => {
           server.middlewares.use(authApiMiddleware());
           server.middlewares.use(agentApiMiddleware());
           server.middlewares.use(uploadMiddleware());
+          server.middlewares.use(archiveApiMiddleware());
           server.middlewares.use(apiMiddleware());
         },
         configurePreviewServer(server) {
@@ -48,6 +50,7 @@ export default defineConfig(({ mode, command }) => {
           server.middlewares.use(authApiMiddleware());
           server.middlewares.use(agentApiMiddleware());
           server.middlewares.use(uploadMiddleware());
+          server.middlewares.use(archiveApiMiddleware());
           server.middlewares.use(apiMiddleware());
         },
       },

@@ -8,6 +8,7 @@ import {
   initDB,
   upsertDoc,
   getDoc,
+  getDocByKey,
   searchDocs,
   listAllDocs,
   listAllDocsFull,
@@ -68,6 +69,15 @@ export function apiMiddleware(): Connect.NextHandleFunction {
           res.end('Not Found');
           return;
         }
+        // 文档已有归档 token → 302 到文档级固定链接（FR-19 兼容）
+        const doc = share.doc_key ? getDocByKey(uid, share.doc_key) : undefined;
+        if (doc?.archive_token) {
+          res.statusCode = 302;
+          res.setHeader('Location', `/a/${doc.archive_token}`);
+          res.setHeader('Cache-Control', 'no-store');
+          res.end();
+          return;
+        }
         res.statusCode = 200;
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.end(buildShareHtmlDoc(share.share_md));
@@ -90,11 +100,6 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, saved);
       }
 
-      const archiveGet = url.match(/^\/api\/archive(?:\?.*)?$/);
-      if (archiveGet && req.method === 'GET') {
-        const q = new URL(url, 'http://localhost').searchParams.get('q') || undefined;
-        return sendJson(res, 200, listArchive(uid, q));
-      }
       if (url === '/api/archive/folders' && req.method === 'POST') {
         const b = await readJson(req);
         return sendJson(res, 200, createArchiveFolder(uid, b.path));
@@ -187,9 +192,8 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       }
       const shareDelMatch = url.match(/^\/api\/share\/(\d+)$/);
       if (shareDelMatch && req.method === 'DELETE') {
-        const id = Number(shareDelMatch[1]);
-        if (!getShare(uid, id)) return sendJson(res, 404, { error: '不存在' });
-        return sendJson(res, 200, deleteShare(uid, id));
+        // 已由 archiveApiMiddleware 接管（含 ?purge=1 彻底删除）
+        return next();
       }
 
       const mediaListMatch = url.match(/^\/api\/media(?:\?.*)?$/);

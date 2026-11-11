@@ -60,6 +60,32 @@ export async function uploadToQiniu(
   return { url, key };
 }
 
+/** 用调用方指定的 key 上传（归档产物需要不可变、可预测的文件名）。 */
+export async function uploadToQiniuWithKey(
+  config: QiniuConfig,
+  buffer: Buffer,
+  key: string,
+  _contentType: string,
+): Promise<{ url: string; key: string }> {
+  const mac = new qiniu.auth.digest.Mac(config.accessKey, config.secretKey);
+  const putPolicy = new qiniu.rs.PutPolicy({ scope: `${config.bucket}:${key}` });
+  const uploadToken = putPolicy.uploadToken(mac);
+  const conf = new qiniu.conf.Config({ zone: ZONES[config.zone] });
+  const formUploader = new qiniu.form_up.FormUploader(conf);
+  const putExtra = new qiniu.form_up.PutExtra();
+  const result = await formUploader.put(uploadToken, key, buffer, putExtra);
+  if (!result.ok()) {
+    const detail = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+    throw new Error('七牛云上传失败：' + detail);
+  }
+  const domain = config.domain.replace(/\/$/, '');
+  const baseUrl = `${domain}/${key}`;
+  const url = config.privateBucket
+    ? makePrivateUrl(baseUrl, config.accessKey, config.secretKey, config.urlTtl)
+    : baseUrl;
+  return { url, key };
+}
+
 export function deleteFromQiniu(config: QiniuConfig, key: string): Promise<void> {
   const mac = new qiniu.auth.digest.Mac(config.accessKey, config.secretKey);
   const conf = new qiniu.conf.Config({ zone: ZONES[config.zone] });
