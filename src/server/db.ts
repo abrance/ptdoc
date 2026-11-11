@@ -1159,9 +1159,16 @@ export function sha256Content(content: string): string {
   return sha256Text(content);
 }
 
-/** 归档相关接口的路径参数既可是数字 doc id，也可是 doc_key。 */
+/** 归档相关接口的路径参数既可是数字 doc id，也可是 doc_key（URL 里带 / 的 key 只能是转义形式）。 */
 export function resolveDocRef(userId: number, ref: string | number): DocRow | undefined {
-  const s = String(ref);
+  let s = String(ref);
+  if (s.includes('%')) {
+    try {
+      s = decodeURIComponent(s);
+    } catch {
+      // 非法转义按原文查找，交给调用方走 404
+    }
+  }
   if (/^\d+$/.test(s)) {
     const byId = getDoc(userId, Number(s));
     if (byId) return byId;
