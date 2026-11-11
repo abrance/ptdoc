@@ -65,7 +65,7 @@ export async function uploadToQiniuWithKey(
   config: QiniuConfig,
   buffer: Buffer,
   key: string,
-  _contentType: string,
+  contentType: string,
 ): Promise<{ url: string; key: string }> {
   const mac = new qiniu.auth.digest.Mac(config.accessKey, config.secretKey);
   const putPolicy = new qiniu.rs.PutPolicy({ scope: `${config.bucket}:${key}` });
@@ -73,6 +73,7 @@ export async function uploadToQiniuWithKey(
   const conf = new qiniu.conf.Config({ zone: ZONES[config.zone] });
   const formUploader = new qiniu.form_up.FormUploader(conf);
   const putExtra = new qiniu.form_up.PutExtra();
+  putExtra.mimeType = contentType;
   const result = await formUploader.put(uploadToken, key, buffer, putExtra);
   if (!result.ok()) {
     const detail = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
@@ -100,20 +101,32 @@ export function deleteFromQiniu(config: QiniuConfig, key: string): Promise<void>
   });
 }
 
-export function testQiniuBucket(config: QiniuConfig): Promise<void> {
+/**
+ * 真上传一个探针对象再删掉。stat 探测在 region 选错时同样返回 612（对象不存在），
+ * 会误判为连通，直到首次归档才 500；写一次才真正验证 bucket / region / 写权限。
+ */
+export async function testQiniuBucket(config: QiniuConfig): Promise<void> {
   const mac = new qiniu.auth.digest.Mac(config.accessKey, config.secretKey);
   const conf = new qiniu.conf.Config({ zone: ZONES[config.zone] });
+  const key = `__ptdoc_connectivity_probe__/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
+  const putPolicy = new qiniu.rs.PutPolicy({ scope: `${config.bucket}:${key}` });
+  const uploadToken = putPolicy.uploadToken(mac);
+  const putExtra = new qiniu.form_up.PutExtra();
+  putExtra.mimeType = 'text/plain';
+  const result = await new qiniu.form_up.FormUploader(conf).put(
+    uploadToken,
+    key,
+    Buffer.from('ok'),
+    putExtra,
+  );
+  if (!result.ok()) {
+    const detail =
+      typeof result.data === 'string' ? result.data : JSON.stringify(result.data ?? '').slice(0, 200);
+    throw new Error(`七牛连通性校验失败（写探针对象）：${detail}`);
+  }
+  // 探针删除失败不影响配置有效性，交给 bucket 生命周期清理
   const bucketManager = new qiniu.rs.BucketManager(mac, conf);
-  return new Promise((resolve, reject) => {
-    bucketManager.stat(config.bucket, '__ptdoc_connectivity_probe__', (err, respBody, respInfo) => {
-      if (err) return reject(err);
-      const code = respInfo?.statusCode ?? 0;
-      if (code === 612 || (code >= 200 && code < 300)) return resolve();
-      const detail =
-        typeof respBody === 'string' ? respBody : JSON.stringify(respBody ?? '').slice(0, 200);
-      reject(new Error(`七牛连通性校验失败（HTTP ${code}）：${detail}`));
-    });
-  });
+  await new Promise<void>((resolve) => bucketManager.delete(config.bucket, key, () => resolve()));
 }
 
 function makePrivateUrl(baseUrl: string, accessKey: string, secretKey: string, ttl: number): string {
