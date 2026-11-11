@@ -12,7 +12,7 @@ import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
 import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
-import { askConfirm, askText } from './dialog';
+import { initVersionsDrawer } from './versions';
 import { showToast } from './toast';
 import {
   initArchivePage,
@@ -927,183 +927,16 @@ function escapeHtml(s: string): string {
   );
 }
 
-// ─── 版本快照 ───────────────────────────────────────────
-interface SnapshotRow {
-  id: number;
-  doc_id: number;
-  content: string;
-  label: string | null;
-  created_at: number;
-}
-
-$('snapshots').addEventListener('click', toggleSnapshotDrawer);
-
-function toggleSnapshotDrawer(): void {
-  const drawer = ensureSnapshotDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) void refreshSnapshots();
-}
-
-function ensureSnapshotDrawer(): HTMLElement {
-  let drawer = document.getElementById('snapshot-drawer');
-  if (drawer) return drawer;
-  drawer = document.createElement('div');
-  drawer.id = 'snapshot-drawer';
-  drawer.className = 'drawer';
-  drawer.innerHTML = `
-    <div class="drawer-head">
-      <span class="drawer-title">版本快照</span>
-      <button id="snapshot-new" type="button">保存快照</button>
-      <button id="snapshot-close" type="button">✕</button>
-    </div>
-    <ul id="snapshot-list" class="history-list"></ul>`;
-  document.body.appendChild(drawer);
-  $('snapshot-close').addEventListener('click', () => drawer!.classList.remove('open'));
-  $('snapshot-new').addEventListener('click', () => void saveSnapshot());
-  const list = $('snapshot-list') as HTMLElement;
-  list.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
-    const li = (e.target as HTMLElement).closest<HTMLElement>('.snapshot-item');
-    if (!btn || !li) return;
-    const snap: SnapshotRow = JSON.parse(li.dataset.snap || '{}');
-    const op = btn.dataset.op;
-    if (op === 'preview') previewSnapshot(snap);
-    else if (op === 'restore') void restoreSnapshot(snap);
-    else if (op === 'delete') void deleteSnapshot(snap);
-  });
-  return drawer;
-}
-
-async function refreshSnapshots(): Promise<void> {
-  const list = $('snapshot-list') as HTMLElement;
-  if (currentDocId == null) {
-    list.innerHTML = '<li class="empty">请先保存或打开一篇文档</li>';
-    return;
-  }
-  try {
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots`);
-    const snaps = (await res.json()) as SnapshotRow[];
-    list.innerHTML = '';
-    if (snaps.length === 0) {
-      list.innerHTML = '<li class="empty">暂无快照，点「保存快照」记录当前版本</li>';
-      return;
-    }
-    snaps.forEach((s) => {
-      const li = document.createElement('li');
-      li.className = 'snapshot-item';
-      li.dataset.snap = JSON.stringify(s);
-      const preview = s.content.replace(/\s+/g, ' ').slice(0, 42);
-      li.innerHTML = `
-        <div class="snap-label">${escapeHtml(s.label || '未命名')}</div>
-        <div class="hi-meta">${relativeTime(s.created_at)} · ${preview}${s.content.length > 42 ? '…' : ''}</div>
-        <div class="snap-ops">
-          <button data-op="preview" type="button">预览</button>
-          <button data-op="restore" type="button">恢复</button>
-          <button data-op="delete" type="button">删除</button>
-        </div>`;
-      list.appendChild(li);
-    });
-  } catch {
-    list.innerHTML = '<li class="empty">加载失败</li>';
-  }
-}
-
-async function saveSnapshot(): Promise<void> {
-  if (currentDocId == null) {
-    setStatus('请先保存或打开一篇文档', true);
-    return;
-  }
-  const label = await askText({ title: '保存快照', label: '快照标签（可留空，如 v1 评审稿）', value: '', confirmLabel: '保存' });
-  if (label === null) return; // 取消就别建快照（原来 prompt 取消也会落一个无标签快照）
-  const tag = label.trim() || undefined;
-  try {
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: tag }),
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setStatus('已保存快照' + (tag ? '：' + tag : ''));
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('保存快照失败：' + (e as Error).message, true);
-  }
-}
-
-/** 只读预览快照内容，可在弹窗内直接恢复。 */
-function previewSnapshot(snap: SnapshotRow): void {
-  let modal = document.getElementById('snap-preview-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'snap-preview-modal';
-    modal.className = 'modal-backdrop';
-    modal.innerHTML = `
-      <div class="modal">
-        <div class="modal-head">
-          <span>快照预览（只读）</span>
-          <button id="snap-preview-close" type="button">✕</button>
-        </div>
-        <textarea id="snap-preview-text" readonly spellcheck="false"></textarea>
-        <div class="modal-foot">
-          <button id="snap-preview-restore" type="button">恢复此版本</button>
-        </div>
-      </div>`;
-    document.body.appendChild(modal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) modal!.remove();
-    });
-    $('snap-preview-close').addEventListener('click', () => modal!.remove());
-    $('snap-preview-restore').addEventListener('click', () => {
-      modal!.remove();
-      void restoreSnapshot(snap);
-    });
-  }
-  ($('snap-preview-text') as HTMLTextAreaElement).value = snap.content;
-  modal.classList.add('open');
-}
-
-async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
-  if (currentDocId == null) return;
-  const ok = await askConfirm('将覆盖当前内容，系统会先自动保留一个「恢复前」快照。', {
-    title: `恢复到「${snap.label || '未命名'}」？`,
-    confirmLabel: '恢复',
-  });
-  if (!ok) return;
-  try {
-    // 恢复前自动留一个兜底快照
-    await fetch(`/api/docs/${currentDocId}/snapshots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: '恢复前自动保存' }),
-    });
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}/restore`, {
-      method: 'POST',
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setDocSource('snapshot', '版本快照', '恢复的是历史版本快照的内容，并非当前磁盘文件；保存后快照内容会写入数据库');
-    loadContent(currentDocKey, currentFilename, snap.content);
-    setStatus('已恢复到快照：' + (snap.label || '未命名'));
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('恢复失败：' + (e as Error).message, true);
-  }
-}
-
-async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
-  const ok = await askConfirm('不影响当前文档内容。', {
-    title: '删除该快照？',
-    confirmLabel: '删除',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}`, { method: 'DELETE' });
-    setStatus('已删除快照');
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('删除快照失败：' + (e as Error).message, true);
-  }
-}
+// ─── 版本时间线（M2-4）────────────────────────────────────
+const versionsDrawer = initVersionsDrawer({
+  getRef: () => (currentDocId != null ? currentDocId : currentDocKey || null),
+  onStatus: setStatus,
+  onRestored: (content) => {
+    setDocSource('snapshot', '历史版本', '回滚的是历史版本的内容，并非当前磁盘文件；保存后版本内容会写入数据库');
+    loadContent(currentDocKey, currentFilename, content);
+  },
+});
+$('snapshots').addEventListener('click', () => versionsDrawer.toggle());
 
 // ─── 启动（登录后才加载工作区）──────────────────────────
 $('toc-toggle').addEventListener('click', () => toggleToc());
