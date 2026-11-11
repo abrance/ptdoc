@@ -87,7 +87,7 @@
           <nav class="nav-tabs" role="tablist" aria-label="主导航">
             <button type="button" role="tab" data-nav="docs" class="active" aria-selected="true">文档</button>
             <button type="button" role="tab" data-nav="agent" aria-selected="false">智能体</button>
-            <button type="button" role="tab" data-nav="share" aria-selected="false">分享</button>
+            <button type="button" role="tab" data-nav="archive" aria-selected="false">归档</button>
             <button type="button" role="tab" data-nav="settings" aria-selected="false">设置</button>
           </nav>
           <div class="doc-meta">
@@ -159,11 +159,11 @@
             </section>
             <div class="sider-note">会话状态（可观测/草稿）展示在右侧工作区。</div>
           </div>
-          <div class="sider-page" data-page="share">
+          <div class="sider-page" data-page="archive">
             <nav class="nav-menu">
               <button class="share-media-btn" type="button">媒体库</button>
             </nav>
-            <div class="sider-note">发布/分享操作在编辑器顶栏「生成分享版」；产物管理见「归档」页。</div>
+            <div class="sider-note">归档产物在右侧列表管理：每篇文档一个固定链接，重新归档链接不变。</div>
           </div>
           <div class="sider-page" data-page="settings">
             <div class="nav-group">
@@ -200,8 +200,10 @@
                     <button id="open-md" type="button">打开</button>
                     <button id="upload-img" type="button">上传图片</button>
                   </div>
-                  <div class="action-group">
-                    <button id="share" class="btn-primary" type="button">生成分享版<span id="share-badge" class="share-badge" hidden></span></button>
+                  <div class="action-group archive-group">
+                    <span id="archive-state" class="archive-state">未归档</span>
+                    <button id="archive-copy" type="button" hidden>复制链接</button>
+                    <button id="archive" class="btn-primary" type="button">归档</button>
                   </div>
                   <div class="action-group action-secondary" id="action-secondary">
                     <button id="toc-toggle" type="button">目录</button>
@@ -222,6 +224,12 @@
                 <article id="preview" class="markdown-body"></article>
               </section>
               </div>
+            </div>
+            <div id="archive-result" class="archive-result" hidden>
+              <span class="archive-result-label">归档链接</span>
+              <span id="archive-result-url" class="archive-result-url"></span>
+              <button id="archive-result-copy" type="button">复制</button>
+              <button id="archive-result-close" class="icon-btn" type="button" aria-label="关闭">✕</button>
             </div>
           </section>
           <!-- 智能体主界面（Sider = 会话导航，这里 = 会话工作区） -->
@@ -256,15 +264,16 @@
               </div>
             </div>
           </section>
-          <!-- 分享主界面（Sider = 媒体库入口，这里 = 分享记录列表） -->
-          <section class="main-page" data-main="share">
-            <div class="share-page">
+          <!-- 归档列表页（Sider = 媒体库入口，这里 = 归档产物列表） -->
+          <section class="main-page" data-main="archive">
+            <div class="archive-page">
               <header class="page-head">
-                <span class="page-title">分享记录</span>
-                <span class="page-hint">发布产物在「归档」页管理</span>
+                <span class="page-title">归档</span>
+                <input id="archive-search" type="search" placeholder="搜索标题或 doc_key…" aria-label="搜索归档" autocomplete="off" />
+                <button id="archive-open-docs" type="button">文档列表</button>
                 <button id="media" type="button">媒体库</button>
               </header>
-              <ul id="share-list-body" class="history-list share-list-main"></ul>
+              <ul id="archive-list" class="archive-list"></ul>
             </div>
           </section>
           <!-- 设置主界面（Sider = 分区导航，这里 = 设置分区） -->
