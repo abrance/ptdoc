@@ -1,8 +1,6 @@
 import { siteConfig } from '../config';
 import { renderMarkdown } from '../core/markdown';
-import { renderMermaidBlocks, renderMermaidToPngBlob, sha256Mermaid } from '../core/mermaid';
-import { buildShareHtmlDoc } from '../core/share-html';
-import { diffPublish, type PublishBaseline, type PublishDiff } from '../core/publish-check';
+import { renderMermaidBlocks } from '../core/mermaid';
 import MiniSearch from 'minisearch';
 import { saveHandle, getHandle, setHandleUser } from './fileHandles';
 import { renderToc, attachTocScrollHighlight } from './toc';
@@ -14,8 +12,15 @@ import { initAdminPanel } from './admin';
 import { initAgentChat } from './agent-chat';
 import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
-import { askConfirm, askText } from './dialog';
+import { initVersionsDrawer } from './versions';
 import { showToast } from './toast';
+import {
+  initArchivePage,
+  initArchiveToolbar,
+  markArchiveStatusUnknown,
+  refreshArchiveList,
+  refreshArchiveStatus,
+} from './archive';
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const editor = $('editor') as HTMLTextAreaElement;
@@ -33,13 +38,6 @@ let currentDocKey = 'default';
 let currentFilename = 'index.md';
 let renderTimer: number | undefined;
 let saveTimer: number | undefined;
-// 当前分享弹窗对应的 shares 记录 id（上传 HTML 成功后回写 html_url 用）
-let currentShareId: number | null = null;
-// 发布一致性检查：当前文档最近一次发布的基准 + 最近一次对比结果
-let publishBaseline: PublishBaseline | null = null;
-let lastPublishDiff: PublishDiff | null = null;
-let publishCheckSeq = 0;
-let publishCheckTimer: number | undefined;
 // 当前文档内容来源（历史打开时区分磁盘实时读取 / 数据库快照回退）
 type DocSourceKind = 'disk' | 'snapshot' | 'default';
 let currentDocSource: { kind: DocSourceKind; label: string; reason: string } | null = null;
@@ -230,7 +228,7 @@ function setSidebarOpen(open: boolean): void {
 // ─── Workbench 一级导航（视图/检索/场景/集成）──────────────
 // 顶栏 Tab 决定左侧 Sider 显示哪一页；检索/场景的树形导航直接住在 Sider 里，
 // 不再走右侧抽屉。切到非视图页时如果侧栏是收起的，自动展开。
-type NavPage = 'docs' | 'agent' | 'share' | 'settings';
+type NavPage = 'docs' | 'agent' | 'archive' | 'settings';
 let navPage: NavPage = 'docs';
 
 function setNav(page: NavPage): void {
@@ -242,7 +240,7 @@ function setNav(page: NavPage): void {
     b.setAttribute('aria-selected', String(on));
   });
   // Sider 分页 + 主界面双切（Workbench：每个 Tab = Sider 导航 + 主界面）
-  // 归档并入文档页（侧栏底部折叠区），不再有独立归档 Tab
+  // 四个 Tab：文档 / 智能体 / 归档（产物列表）/ 设置
   document.querySelectorAll<HTMLElement>('.sider-page').forEach((p) => {
     p.classList.toggle('active', p.dataset.page === page);
   });
@@ -257,6 +255,7 @@ function setNav(page: NavPage): void {
     else if (document.body.classList.contains('sidebar-collapsed')) setSidebarOpen(true);
   }
   if (page === 'agent') void refreshNavConvs();
+  if (page === 'archive') void refreshArchiveList();
   if (page === 'settings') void syncSettingsDots();
 }
 
@@ -452,7 +451,11 @@ async function saveCurrentDoc(): Promise<void> {
     });
     const r = (await res.json()) as { id: number };
     currentDocId = r.id;
-    if (seq === saveSeq) setSaveState('saved');
+    if (seq === saveSeq) {
+      setSaveState('saved');
+      // 保存成功后才可能变成「有更新未归档」，徽标就地刷新（改一个字不用手动 F5）
+      void refreshArchiveStatus();
+    }
   } catch {
     /* 离线时静默忽略，但状态栏要如实显示 */
     if (seq === saveSeq) setSaveState('error');
@@ -522,7 +525,7 @@ async function loadDefaultDoc(): Promise<void> {
     setDocSource('default', '默认文档', '内置示例文档（非本地文件），不参与磁盘同步');
     render();
     saveCurrentDoc();
-    void refreshPublishBaseline();
+    void refreshArchiveStatus({ force: true });
   } catch (e) {
     setStatus('未能加载默认文档：' + (e as Error).message, true);
   }
@@ -571,11 +574,14 @@ function loadContent(docKey: string, filename: string, content: string): void {
   editor.value = content;
   currentDocKey = docKey;
   currentFilename = filename;
+  // 新文档的 id 要等保存回来才知道，先置空，避免拿上一篇的 id 去查归档状态
+  currentDocId = null;
+  markArchiveStatusUnknown();
   render();
   syncChrome();
   saveCurrentDoc();
   sidebarRef?.refresh();
-  void refreshPublishBaseline();
+  void refreshArchiveStatus({ force: true });
 }
 
 // ─── 上传图片到七牛图床 ─────────────────────────────────
@@ -595,314 +601,6 @@ async function uploadImage(file: File): Promise<void> {
     insertAtCursor(`\n![${file.name}](${data.url})\n`);
     setStatus('已上传：' + data.url);
     render();
-  } catch (e) {
-    setStatus('上传失败：' + (e as Error).message, true);
-  } finally {
-    setTimeout(() => setProgress(null), 400);
-  }
-}
-
-// ─── 发布一致性检查（当前文档 vs 最近一次发布）────────
-// 打开/切换文档时拉取基准；编辑时防抖重算；结果以「生成分享版」按钮角标呈现。
-async function refreshPublishBaseline(): Promise<void> {
-  const seq = ++publishCheckSeq;
-  clearTimeout(publishCheckTimer);
-  publishBaseline = null;
-  lastPublishDiff = null;
-  updatePublishBadge();
-  if (!currentDocKey) return;
-  try {
-    const res = await fetch('/api/share?doc_key=' + encodeURIComponent(currentDocKey));
-    const rows = (await res.json()) as Array<{ id: number }>;
-    if (seq !== publishCheckSeq) return;
-    if (rows.length === 0) return; // 该文档从未发布过：无基准，不提示
-    const detail = (await (await fetch('/api/share/' + rows[0].id)).json()) as {
-      share_md: string;
-      images: Array<{ url: string; mermaid_hash: string | null }>;
-    };
-    if (seq !== publishCheckSeq) return;
-    publishBaseline = { share_md: detail.share_md, images: detail.images ?? [] };
-    await runPublishCheck();
-  } catch {
-    /* 离线等场景静默忽略 */
-  }
-}
-
-async function runPublishCheck(): Promise<void> {
-  const seq = publishCheckSeq;
-  const base = publishBaseline;
-  clearTimeout(publishCheckTimer);
-  const diff = await diffPublish(editor.value, base);
-  if (seq !== publishCheckSeq || base !== publishBaseline) return; // 基准已变化，丢弃旧结果
-  lastPublishDiff = diff;
-  updatePublishBadge(diff);
-}
-
-function schedulePublishCheck(): void {
-  clearTimeout(publishCheckTimer);
-  publishCheckTimer = window.setTimeout(() => void runPublishCheck(), 1000);
-}
-
-function updatePublishBadge(diff?: PublishDiff | null): void {
-  const badge = $('share-badge');
-  if (!diff || !diff.hasBaseline || diff.consistent) {
-    badge.hidden = true;
-    badge.textContent = '';
-    return;
-  }
-  const changed = diff.diagrams.filter((d) => d.status !== 'same').length + diff.removed.length;
-  const n = diff.textChanges + changed;
-  badge.hidden = false;
-  badge.textContent = String(n);
-  badge.title = `与上次发布不一致：文字改动 ${diff.textChanges} 处、图表变更 ${changed} 个`;
-}
-
-/** 展示"与上次发布不一致"的差异摘要弹窗；confirmLabel 提供时显示确认按钮（生成前确认用）。 */
-function showPublishDiffModal(diff: PublishDiff, confirmLabel?: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const modal = document.createElement('div');
-    modal.className = 'modal-backdrop open';
-    const items: string[] = [];
-    if (diff.textChanges > 0) items.push(`<li>文字改动 ${diff.textChanges} 处</li>`);
-    for (const d of diff.diagrams) {
-      if (d.status === 'modified') items.push(`<li class="modified">第 ${d.index} 个图表：内容已修改</li>`);
-      else if (d.status === 'added') items.push(`<li class="added">新增了第 ${d.index} 个图表</li>`);
-    }
-    for (const idx of diff.removed) items.push(`<li class="removed">删除了发布版中的第 ${idx} 个图表</li>`);
-    const listHtml =
-      items.length > 0
-        ? `<ul>${items.join('')}</ul>`
-        : '<p>细节无法逐项比对（如渲染主题版本已升级），重新生成一次分享版即可覆盖。</p>';
-    const foot = confirmLabel
-      ? `<button id="pd-cancel" type="button">取消</button><button id="pd-confirm" type="button">${confirmLabel}</button>`
-      : `<button id="pd-close" type="button">知道了</button>`;
-    modal.innerHTML = `
-      <div class="modal">
-        <div class="modal-head"><span>与上次发布不一致</span></div>
-        <div class="pd-body">${listHtml}</div>
-        <div class="modal-foot">${foot}</div>
-      </div>`;
-    document.body.appendChild(modal);
-    const done = (ok: boolean): void => {
-      modal.remove();
-      resolve(ok);
-    };
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) done(false);
-    });
-    $('pd-cancel')?.addEventListener('click', () => done(false));
-    $('pd-close')?.addEventListener('click', () => done(false));
-    $('pd-confirm')?.addEventListener('click', () => done(true));
-  });
-}
-
-// ─── 生成分享版（mermaid -> PNG -> 七牛 -> 远程图片 md）──
-$('share-badge').addEventListener('click', (e) => {
-  e.stopPropagation();
-  if (lastPublishDiff && !lastPublishDiff.consistent) void showPublishDiffModal(lastPublishDiff);
-});
-$('share').addEventListener('click', () => void onGenerateShareClick());
-
-/** 点「生成分享版」：若存在未发布的改动，先弹差异确认；一致则直接生成。 */
-async function onGenerateShareClick(): Promise<void> {
-  const diff = lastPublishDiff;
-  if (diff && diff.hasBaseline && !diff.consistent) {
-    const proceed = await showPublishDiffModal(diff, '继续生成');
-    if (!proceed) return;
-  }
-  await generateShare();
-}
-async function generateShare(): Promise<void> {
-  const md = editor.value;
-  const fenceRe = /```mermaid\s*\n([\s\S]*?)```/g;
-  const matches = [...md.matchAll(fenceRe)];
-  if (matches.length === 0) setStatus('未发现 mermaid 代码块，直接生成分享版…');
-  else setStatus(`正在转换 ${matches.length} 个图表为图片并上传…`);
-
-  const images: Array<{ qiniu_key: string; url: string; mermaid_hash: string }> = [];
-  let result = '';
-  let last = 0;
-  let i = 0;
-  const total = matches.length;
-  let done = 0;
-  setProgress(0);
-  // 分享版 .md / .html 在七牛上的落地 URL（随记录入库，供分享记录查看）
-  let mdUrl = '';
-  let htmlUrl = '';
-
-  // 拉取 mermaid 内容 -> 已上传图片 的缓存，相同内容直接复用，避免重复生成/上传
-  const cache = (await fetch('/api/mermaid-cache').then((r) => r.json())) as Record<string, string>;
-  let cacheHits = 0;
-
-  try {
-    for (const m of matches) {
-      const full = m[0];
-      const start = m.index ?? 0;
-      result += md.slice(last, start);
-      const code = m[1];
-      const hash = await sha256Mermaid(code);
-
-      // 命中缓存：复用已上传图片，跳过渲染与上传
-      if (cache[hash]) {
-        cacheHits++;
-        setStatus(`生成分享版：复用第 ${i + 1}/${total} 张（已存在）`);
-        images.push({ qiniu_key: '', url: cache[hash], mermaid_hash: hash });
-        result += `![图 ${i + 1}](${cache[hash]})\n`;
-        last = start + full.length;
-        done++;
-        setProgress(done / total);
-        i++;
-        continue;
-      }
-
-      setStatus(`生成分享版：渲染第 ${i + 1}/${total} 张图表…`);
-      const blob = await renderMermaidToPngBlob(code);
-      setStatus(`生成分享版：上传第 ${i + 1}/${total} 张…`);
-      const fname = `mermaid-${hash.slice(0, 12)}-${i}.png`;
-      const up = await uploadBinary(await blob.arrayBuffer(), fname, (frac) =>
-        setProgress((done + frac) / total),
-        undefined,
-        'mermaid',
-      );
-      images.push({ qiniu_key: up.key, url: up.url, mermaid_hash: hash });
-      // 写入缓存，供以后相同内容复用
-      void fetch('/api/mermaid-cache', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hash, key: up.key, url: up.url }),
-      }).catch(() => {});
-      result += `![图 ${i + 1}](${up.url})\n`;
-      last = start + full.length;
-      done++;
-      setProgress(done / total);
-      i++;
-    }
-    result += md.slice(last);
-
-    // 同时把分享版 .md（图片已替换为远程链接）与渲染好的 .html 一起传到七牛，
-    // 分享记录里可直接查看这两份文件。
-    setStatus('生成分享版：上传 .md 与 .html…');
-    const ts = Date.now();
-    const mdBlob = new Blob([result], { type: 'text/markdown;charset=utf-8' });
-    mdUrl = (await uploadBinary(await mdBlob.arrayBuffer(), `share-${ts}.md`, undefined, 'share', 'share')).url;
-    const html = buildShareHtmlDoc(result, deriveTitle(result, currentFilename));
-    const htmlBlob = new Blob([html], { type: 'text/html;charset=utf-8' });
-    htmlUrl = (await uploadBinary(await htmlBlob.arrayBuffer(), `share-${ts}.html`, undefined, 'share', 'share')).url;
-  } catch (e) {
-    setStatus('生成分享版失败：' + (e as Error).message, true);
-    setProgress(null);
-    return;
-  }
-
-  // 记录元信息到 SQLite（即使弹窗展示失败也先存）
-  let shareId: number | null = null;
-  try {
-    const r = (await fetch('/api/share', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        doc_key: currentDocKey,
-        share_md: result,
-        images,
-        md_url: mdUrl,
-        html_url: htmlUrl,
-      }),
-    }).then((r) => r.json())) as { id: number };
-    shareId = r.id ?? null;
-    // 刚发布成功，刷新一致性基准（角标消失或反映新状态）
-    void refreshPublishBaseline();
-    void sidebarRef?.refresh();
-  } catch {
-    /* 忽略离线 */
-  }
-
-  showShareModal(result, shareId);
-  const reused = cacheHits > 0 ? `，复用缓存 ${cacheHits} 张` : '';
-  const imgs = images.length > 0 ? `${images.length} 张图${reused}，` : '无 mermaid 图，';
-  setStatus(`已生成分享版（${imgs}.md 与 .html 已上传七牛）并记录到数据库`);
-  setTimeout(() => setProgress(null), 500);
-}
-
-// ─── 分享结果弹窗 ───────────────────────────────────────
-function showShareModal(shareMd: string, shareId?: number | null): void {
-  currentShareId = shareId ?? null;
-  let modal = document.getElementById('share-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'share-modal';
-    modal.className = 'modal-backdrop';
-    modal.innerHTML = `
-      <div class="modal">
-        <div class="modal-head">
-          <span>分享版 Markdown（图片已替换为远程链接）</span>
-          <button id="share-close" type="button">✕</button>
-        </div>
-        <textarea id="share-text" readonly spellcheck="false"></textarea>
-      <div class="modal-foot">
-        <button id="share-upload" type="button">上传 HTML 到七牛</button>
-        <button id="share-dl-html" type="button">下载 HTML</button>
-        <button id="share-copy" type="button">复制</button>
-        <button id="share-download" type="button">下载 .md</button>
-      </div>
-      </div>`;
-    document.body.appendChild(modal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) modal!.remove();
-    });
-    $('share-close').addEventListener('click', () => modal!.remove());
-    $('share-copy').addEventListener('click', async () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      await navigator.clipboard.writeText(t.value);
-      setStatus('已复制到剪贴板');
-    });
-    $('share-download').addEventListener('click', () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([t.value], { type: 'text/markdown' }));
-      a.download = (currentFilename || 'doc') + '.share.md';
-      a.click();
-    });
-    $('share-dl-html').addEventListener('click', () => {
-      const t = $('share-text') as HTMLTextAreaElement;
-      const html = buildShareHtmlDoc(t.value, deriveTitle(t.value, currentFilename));
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-      a.download = (currentFilename || 'doc') + '.share.html';
-      a.click();
-    });
-    $('share-upload').addEventListener('click', () => uploadShareHtml());
-  }
-  (modal.querySelector('#share-text') as HTMLTextAreaElement).value = shareMd;
-  modal.classList.add('open');
-}
-
-/** 上传分享版 HTML 到七牛，复制永久 URL，并把链接回写 shares 表对应记录。 */
-async function uploadShareHtml(): Promise<void> {
-  const text = ($('share-text') as HTMLTextAreaElement).value;
-  setStatus('正在上传 HTML 到七牛…');
-  setProgress(0);
-  try {
-    const html = buildShareHtmlDoc(text);
-    const buf = await new Blob([html], { type: 'text/html' }).arrayBuffer();
-    const fname = `share-${Date.now()}.html`;
-    const up = await uploadBinary(buf, fname, setProgress, 'share', 'share');
-    setProgress(1);
-    await navigator.clipboard.writeText(up.url);
-    if (currentShareId != null) {
-      try {
-        await fetch(`/api/share/${currentShareId}/html`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ html_url: up.url }),
-        });
-        setStatus('已上传，永久链接已复制并入库：' + up.url);
-        void sidebarRef?.refresh();
-      } catch {
-        setStatus('已上传，永久链接已复制：' + up.url + '（记录入库失败）');
-      }
-    } else {
-      setStatus('已上传并复制永久链接：' + up.url);
-    }
   } catch (e) {
     setStatus('上传失败：' + (e as Error).message, true);
   } finally {
@@ -1229,340 +927,16 @@ function escapeHtml(s: string): string {
   );
 }
 
-// ─── 分享记录管理（Sider 分享页）───
-
-interface ShareRow {
-  id: number;
-  doc_key: string | null;
-  md_url: string | null;
-  html_url: string | null;
-  created_at: number;
-}
-
-function initSharePage(opts: { onStatus: (msg: string, isError?: boolean) => void; onDeleted: () => void }): void {
-  const body = $('share-list-body') as HTMLElement;
-  body.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
-    const li = (e.target as HTMLElement).closest<HTMLElement>('.share-row');
-    if (!btn || !li) return;
-    const id = Number(li.dataset.id);
-    const op = btn.dataset.op;
-    if (op === 'copy') void copyShareLink(id);
-    else if (op === 'open') openShareLink(id);
-    else if (op === 'md') void viewShareMd(id);
-    else if (op === 'delete') void deleteShareRecord(id, opts);
-  });
-}
-
-async function refreshShareList(): Promise<void> {
-  const body = $('share-list-body') as HTMLElement;
-  body.innerHTML = '<li class="empty">加载中…</li>';
-  try {
-    const res = await fetch('/api/share');
-    const rows = (await res.json()) as ShareRow[];
-    body.innerHTML = '';
-    if (rows.length === 0) {
-      body.innerHTML = '<li class="empty">暂无分享记录</li>';
-      return;
-    }
-    rows.forEach((s) => {
-      const li = document.createElement('li');
-      li.className = 'share-row history-item';
-      li.dataset.id = String(s.id);
-      const when = relativeTime(s.created_at);
-      const published = s.html_url && s.md_url;
-      const linkState = published ? '已发布' : s.html_url ? '已发布(仅HTML)' : '仅托管';
-      li.innerHTML = `
-        <div class="hi-title">${escapeHtml(s.doc_key || '未命名')}</div>
-        <div class="hi-meta">${linkState} · ${when}</div>
-        <div class="share-row-ops">
-          <button data-op="open" type="button">HTML</button>
-          <button data-op="md" type="button">MD</button>
-          <button data-op="copy" type="button">复制链接</button>
-          <button data-op="delete" type="button">删除</button>
-        </div>`;
-      body.appendChild(li);
-    });
-  } catch {
-    body.innerHTML = '<li class="empty">加载失败</li>';
-  }
-}
-
-function shareLinkOf(s: ShareRow): string {
-  return s.html_url || location.origin + '/s/' + s.id;
-}
-
-async function copyShareLink(id: number): Promise<void> {
-  const res = await fetch('/api/share');
-  const rows = (await res.json()) as ShareRow[];
-  const s = rows.find((r) => r.id === id);
-  if (!s) return;
-  try {
-    await navigator.clipboard.writeText(shareLinkOf(s));
-    setStatus('已复制分享链接：' + shareLinkOf(s));
-  } catch (e) {
-    setStatus('复制失败：' + (e as Error).message, true);
-  }
-}
-
-function openShareLink(id: number): void {
-  void (async () => {
-    const res = await fetch('/api/share');
-    const rows = (await res.json()) as ShareRow[];
-    const row = rows.find((r) => r.id === id);
-    if (row) window.open(shareLinkOf(row), '_blank');
-  })();
-}
-
-/** 查看分享版 .md 内容：拉取服务端存的 share_md 弹窗展示，另附七牛上 .md 文件的永久链接。 */
-function viewShareMd(id: number): void {
-  void (async () => {
-    let row: { doc_key: string | null; share_md: string; md_url: string | null } | undefined;
-    try {
-      const res = await fetch(`/api/share/${id}`);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      row = await res.json();
-    } catch (e) {
-      setStatus('获取分享内容失败：' + (e as Error).message, true);
-      return;
-    }
-    let modal = document.getElementById('md-view-modal');
-    if (!modal) {
-      modal = document.createElement('div');
-      modal.id = 'md-view-modal';
-      modal.className = 'modal-backdrop';
-      modal.innerHTML = `
-        <div class="modal">
-          <div class="modal-head">
-            <span>分享版 Markdown 内容</span>
-            <button id="md-view-close" type="button">✕</button>
-          </div>
-          <textarea id="md-view-text" readonly spellcheck="false"></textarea>
-          <div class="modal-foot">
-            <a id="md-view-link" href="#" target="_blank" rel="noopener"
-               style="align-self:center;color:#2563eb;font-size:13px;text-decoration:none">打开七牛上的 .md 文件</a>
-            <button id="md-view-copy" type="button">复制</button>
-          </div>
-        </div>`;
-      document.body.appendChild(modal);
-      modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal!.remove();
-      });
-      $('md-view-close').addEventListener('click', () => modal!.remove());
-      $('md-view-copy').addEventListener('click', async () => {
-        const t = $('md-view-text') as HTMLTextAreaElement;
-        await navigator.clipboard.writeText(t.value);
-        setStatus('已复制 Markdown 内容');
-      });
-    }
-    (modal.querySelector('#md-view-text') as HTMLTextAreaElement).value = row!.share_md;
-    const link = modal.querySelector('#md-view-link') as HTMLAnchorElement;
-    if (row!.md_url) {
-      link.href = row!.md_url;
-      link.style.display = '';
-    } else {
-      link.href = '#';
-      link.style.display = 'none';
-    }
-    modal.classList.add('open');
-  })();
-}
-
-async function deleteShareRecord(id: number, opts?: { onStatus: (msg: string, isError?: boolean) => void; onDeleted: () => void }): Promise<void> {
-  const ok = await askConfirm('仅删除本地记录，七牛上已发布的 HTML 仍可访问。', {
-    title: '删除这条分享记录？',
-    confirmLabel: '删除',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    const res = await fetch(`/api/share/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setStatus('已删除分享记录');
-    opts?.onDeleted();
-    void refreshShareList();
-  } catch (e) {
-    setStatus('删除失败：' + (e as Error).message, true);
-  }
-}
-
-// ─── 版本快照 ───────────────────────────────────────────
-interface SnapshotRow {
-  id: number;
-  doc_id: number;
-  content: string;
-  label: string | null;
-  created_at: number;
-}
-
-$('snapshots').addEventListener('click', toggleSnapshotDrawer);
-
-function toggleSnapshotDrawer(): void {
-  const drawer = ensureSnapshotDrawer();
-  drawer.classList.toggle('open');
-  if (drawer.classList.contains('open')) void refreshSnapshots();
-}
-
-function ensureSnapshotDrawer(): HTMLElement {
-  let drawer = document.getElementById('snapshot-drawer');
-  if (drawer) return drawer;
-  drawer = document.createElement('div');
-  drawer.id = 'snapshot-drawer';
-  drawer.className = 'drawer';
-  drawer.innerHTML = `
-    <div class="drawer-head">
-      <span class="drawer-title">版本快照</span>
-      <button id="snapshot-new" type="button">保存快照</button>
-      <button id="snapshot-close" type="button">✕</button>
-    </div>
-    <ul id="snapshot-list" class="history-list"></ul>`;
-  document.body.appendChild(drawer);
-  $('snapshot-close').addEventListener('click', () => drawer!.classList.remove('open'));
-  $('snapshot-new').addEventListener('click', () => void saveSnapshot());
-  const list = $('snapshot-list') as HTMLElement;
-  list.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
-    const li = (e.target as HTMLElement).closest<HTMLElement>('.snapshot-item');
-    if (!btn || !li) return;
-    const snap: SnapshotRow = JSON.parse(li.dataset.snap || '{}');
-    const op = btn.dataset.op;
-    if (op === 'preview') previewSnapshot(snap);
-    else if (op === 'restore') void restoreSnapshot(snap);
-    else if (op === 'delete') void deleteSnapshot(snap);
-  });
-  return drawer;
-}
-
-async function refreshSnapshots(): Promise<void> {
-  const list = $('snapshot-list') as HTMLElement;
-  if (currentDocId == null) {
-    list.innerHTML = '<li class="empty">请先保存或打开一篇文档</li>';
-    return;
-  }
-  try {
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots`);
-    const snaps = (await res.json()) as SnapshotRow[];
-    list.innerHTML = '';
-    if (snaps.length === 0) {
-      list.innerHTML = '<li class="empty">暂无快照，点「保存快照」记录当前版本</li>';
-      return;
-    }
-    snaps.forEach((s) => {
-      const li = document.createElement('li');
-      li.className = 'snapshot-item';
-      li.dataset.snap = JSON.stringify(s);
-      const preview = s.content.replace(/\s+/g, ' ').slice(0, 42);
-      li.innerHTML = `
-        <div class="snap-label">${escapeHtml(s.label || '未命名')}</div>
-        <div class="hi-meta">${relativeTime(s.created_at)} · ${preview}${s.content.length > 42 ? '…' : ''}</div>
-        <div class="snap-ops">
-          <button data-op="preview" type="button">预览</button>
-          <button data-op="restore" type="button">恢复</button>
-          <button data-op="delete" type="button">删除</button>
-        </div>`;
-      list.appendChild(li);
-    });
-  } catch {
-    list.innerHTML = '<li class="empty">加载失败</li>';
-  }
-}
-
-async function saveSnapshot(): Promise<void> {
-  if (currentDocId == null) {
-    setStatus('请先保存或打开一篇文档', true);
-    return;
-  }
-  const label = await askText({ title: '保存快照', label: '快照标签（可留空，如 v1 评审稿）', value: '', confirmLabel: '保存' });
-  if (label === null) return; // 取消就别建快照（原来 prompt 取消也会落一个无标签快照）
-  const tag = label.trim() || undefined;
-  try {
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: tag }),
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setStatus('已保存快照' + (tag ? '：' + tag : ''));
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('保存快照失败：' + (e as Error).message, true);
-  }
-}
-
-/** 只读预览快照内容，可在弹窗内直接恢复。 */
-function previewSnapshot(snap: SnapshotRow): void {
-  let modal = document.getElementById('snap-preview-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'snap-preview-modal';
-    modal.className = 'modal-backdrop';
-    modal.innerHTML = `
-      <div class="modal">
-        <div class="modal-head">
-          <span>快照预览（只读）</span>
-          <button id="snap-preview-close" type="button">✕</button>
-        </div>
-        <textarea id="snap-preview-text" readonly spellcheck="false"></textarea>
-        <div class="modal-foot">
-          <button id="snap-preview-restore" type="button">恢复此版本</button>
-        </div>
-      </div>`;
-    document.body.appendChild(modal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) modal!.remove();
-    });
-    $('snap-preview-close').addEventListener('click', () => modal!.remove());
-    $('snap-preview-restore').addEventListener('click', () => {
-      modal!.remove();
-      void restoreSnapshot(snap);
-    });
-  }
-  ($('snap-preview-text') as HTMLTextAreaElement).value = snap.content;
-  modal.classList.add('open');
-}
-
-async function restoreSnapshot(snap: SnapshotRow): Promise<void> {
-  if (currentDocId == null) return;
-  const ok = await askConfirm('将覆盖当前内容，系统会先自动保留一个「恢复前」快照。', {
-    title: `恢复到「${snap.label || '未命名'}」？`,
-    confirmLabel: '恢复',
-  });
-  if (!ok) return;
-  try {
-    // 恢复前自动留一个兜底快照
-    await fetch(`/api/docs/${currentDocId}/snapshots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: '恢复前自动保存' }),
-    });
-    const res = await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}/restore`, {
-      method: 'POST',
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    setDocSource('snapshot', '版本快照', '恢复的是历史版本快照的内容，并非当前磁盘文件；保存后快照内容会写入数据库');
-    loadContent(currentDocKey, currentFilename, snap.content);
-    setStatus('已恢复到快照：' + (snap.label || '未命名'));
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('恢复失败：' + (e as Error).message, true);
-  }
-}
-
-async function deleteSnapshot(snap: SnapshotRow): Promise<void> {
-  const ok = await askConfirm('不影响当前文档内容。', {
-    title: '删除该快照？',
-    confirmLabel: '删除',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    await fetch(`/api/docs/${currentDocId}/snapshots/${snap.id}`, { method: 'DELETE' });
-    setStatus('已删除快照');
-    void refreshSnapshots();
-  } catch (e) {
-    setStatus('删除快照失败：' + (e as Error).message, true);
-  }
-}
+// ─── 版本时间线（M2-4）────────────────────────────────────
+const versionsDrawer = initVersionsDrawer({
+  getRef: () => (currentDocId != null ? currentDocId : currentDocKey || null),
+  onStatus: setStatus,
+  onRestored: (content) => {
+    setDocSource('snapshot', '历史版本', '回滚的是历史版本的内容，并非当前磁盘文件；保存后版本内容会写入数据库');
+    loadContent(currentDocKey, currentFilename, content);
+  },
+});
+$('snapshots').addEventListener('click', () => versionsDrawer.toggle());
 
 // ─── 启动（登录后才加载工作区）──────────────────────────
 $('toc-toggle').addEventListener('click', () => toggleToc());
@@ -1576,7 +950,6 @@ editor.addEventListener('input', () => {
   setSaveState('dirty');
   scheduleRender();
   scheduleSave();
-  schedulePublishCheck();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -1675,8 +1048,23 @@ void startGate((user: SessionUser) => {
     },
     onStatus: setStatus,
   });
-  // 分享页主界面：记录列表；媒体库按钮（Sider + 页头）走抽屉
-  initSharePage({ onStatus: setStatus, onDeleted: () => void sidebarRef?.refresh() });
+  // 归档页主界面：产物列表；媒体库按钮（Sider + 页头）走抽屉
+  initArchivePage({
+    openDoc: (id) => {
+      setNav('docs');
+      void openDocById(id);
+    },
+    showDocs: () => setNav('docs'),
+  });
+  initArchiveToolbar({
+    // 优先用数字 id：doc_key 可能带路径分隔符（导入文件夹），数字 id 是唯一稳定的引用。
+    getRef: () =>
+      currentDocId != null
+        ? String(currentDocId)
+        : currentDocKey && !currentDocKey.includes('/')
+          ? currentDocKey
+          : null,
+  });
   for (const btn of document.querySelectorAll('.share-media-btn, #media')) {
     btn.addEventListener('click', () => mediaPanel.toggle());
   }
@@ -1692,7 +1080,7 @@ void startGate((user: SessionUser) => {
       if (currentDocKey === oldKey) {
         currentDocKey = newKey;
         currentFilename = newKey.slice(newKey.lastIndexOf('/') + 1);
-        void refreshPublishBaseline();
+        void refreshArchiveStatus({ force: true });
         syncChrome();
       }
       setStatus('已重命名为：' + newKey);

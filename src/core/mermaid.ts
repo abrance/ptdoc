@@ -132,7 +132,7 @@ const CSS_VARS: Record<string, string> = {
   '--border': DIAGRAM_THEME.border ?? '#d0d7de',
 };
 
-function inlineCssVars(svg: string): string {
+export function inlineCssVars(svg: string): string {
   return svg.replace(/var\((--[\w-]+)\)/g, (_, name: string) => CSS_VARS[name] ?? `var(${name})`);
 }
 

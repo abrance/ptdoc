@@ -73,6 +73,33 @@ export async function askConfirm(
   return (await result) === 'ok';
 }
 
+/**
+ * 归档确认框：说明 + 可留空的备注输入。取消 → null；确定 → 备注（可能是空串）。
+ * 备注为空是合法输入，所以不能用 askText 的 null 表示取消。
+ */
+export async function askNote(opts: {
+  title: string;
+  message: string;
+  label: string;
+  placeholder?: string;
+  confirmLabel?: string;
+}): Promise<string | null> {
+  const { dlg, result } = mountDialog(
+    opts.title,
+    `<div class="dialog-body">${esc(opts.message)}</div>
+     <label class="dialog-field">${esc(opts.label)}
+       <input name="value" type="text" placeholder="${esc(opts.placeholder ?? '')}"
+              autocomplete="off" spellcheck="false" />
+     </label>`,
+    `<button type="button" data-act="cancel">取消</button>
+     <button type="submit" value="ok" class="btn-primary">${esc(opts.confirmLabel ?? '归档')}</button>`,
+  );
+  const input = dlg.querySelector('input') as HTMLInputElement;
+  input.focus();
+  const ok = (await result) === 'ok';
+  return ok ? input.value.trim() : null;
+}
+
 /** 输入框。取消 / Esc / 点遮罩 → null。 */
 export async function askText(opts: {
   title: string;

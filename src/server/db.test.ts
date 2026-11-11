@@ -27,6 +27,7 @@ import {
   updateShareHtmlUrl,
   renameDoc,
   deleteShare,
+  resolveDocRef,
 } from './db.ts';
 
 function tmpDb(): string {
@@ -179,6 +180,18 @@ test('同名 doc_key 分用户隔离；跨用户读取不存在', () => {
   const da = listAllDocs(a.id)[0];
   assert.equal(getDoc(b.id, da.id), undefined);
   assert.equal(getDoc(a.id, da.id)?.content, '# from a');
+  closeDB();
+});
+
+test('resolveDocRef 接受数字 id、裸 doc_key 与 URL 转义后的 doc_key（带 / 的键只能走转义形式）', () => {
+  initDB(tmpDb());
+  const u = createUser('alice', 'hash', 'member');
+  const { id } = upsertDoc(u.id, 'e2e/doc2.md', '斜杠键', 'doc2.md', '# 正文');
+  assert.equal(resolveDocRef(u.id, String(id))?.doc_key, 'e2e/doc2.md');
+  assert.equal(resolveDocRef(u.id, 'e2e/doc2.md')?.id, id);
+  assert.equal(resolveDocRef(u.id, 'e2e%2Fdoc2.md')?.id, id, 'URL 转义后的 doc_key 必须能解析');
+  assert.equal(resolveDocRef(u.id, 'e2e%2Fmissing.md'), undefined);
+  assert.equal(resolveDocRef(u.id, 'bad%zz'), undefined, '非法转义不抛错，按原名查找');
   closeDB();
 });
 

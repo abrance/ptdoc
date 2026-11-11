@@ -8,6 +8,7 @@ import {
   initDB,
   upsertDoc,
   getDoc,
+  getDocByKey,
   searchDocs,
   listAllDocs,
   listAllDocsFull,
@@ -15,6 +16,11 @@ import {
   deleteDoc,
   createSnapshot,
   listSnapshots,
+  listVersions,
+  getVersion,
+  getRetention,
+  setRetention,
+  resolveDocRef,
   restoreSnapshot,
   deleteSnapshot,
   insertShare,
@@ -50,6 +56,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       !url.startsWith('/api/mermaid-cache') &&
       !url.startsWith('/api/media') &&
       !url.startsWith('/api/storage') &&
+      !url.startsWith('/api/settings') &&
       !url.startsWith('/api/archive') &&
       !url.startsWith('/s/')
     )
@@ -66,6 +73,15 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         if (!share) {
           res.statusCode = 404;
           res.end('Not Found');
+          return;
+        }
+        // 文档已有归档 token → 302 到文档级固定链接（FR-19 兼容）
+        const doc = share.doc_key ? getDocByKey(uid, share.doc_key) : undefined;
+        if (doc?.archive_token) {
+          res.statusCode = 302;
+          res.setHeader('Location', `/a/${doc.archive_token}`);
+          res.setHeader('Cache-Control', 'no-store');
+          res.end();
           return;
         }
         res.statusCode = 200;
@@ -90,11 +106,6 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, saved);
       }
 
-      const archiveGet = url.match(/^\/api\/archive(?:\?.*)?$/);
-      if (archiveGet && req.method === 'GET') {
-        const q = new URL(url, 'http://localhost').searchParams.get('q') || undefined;
-        return sendJson(res, 200, listArchive(uid, q));
-      }
       if (url === '/api/archive/folders' && req.method === 'POST') {
         const b = await readJson(req);
         return sendJson(res, 200, createArchiveFolder(uid, b.path));
@@ -133,6 +144,66 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       const snapDelMatch = url.match(/^\/api\/docs\/(\d+)\/snapshots\/(\d+)$/);
       if (snapDelMatch && req.method === 'DELETE') {
         return sendJson(res, 200, deleteSnapshot(uid, Number(snapDelMatch[2])));
+      }
+
+      // ─── 版本面板（FR-22）: /api/docs/:id/versions*，:id 接受数字 id 或 URL 转义后的 doc_key ───
+      const versionRestoreMatch = url.match(/^\/api\/docs\/([^/]+)\/versions\/(\d+)\/restore$/);
+      if (versionRestoreMatch && req.method === 'POST') {
+        const doc = resolveDocRef(uid, versionRestoreMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        return sendJson(res, 200, restoreSnapshot(uid, doc.id, Number(versionRestoreMatch[2])));
+      }
+      const versionOneMatch = url.match(/^\/api\/docs\/([^/]+)\/versions\/(\d+)$/);
+      if (versionOneMatch) {
+        const doc = resolveDocRef(uid, versionOneMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        const vid = Number(versionOneMatch[2]);
+        if (req.method === 'GET') {
+          const v = getVersion(uid, doc.id, vid);
+          if (!v) throw new HttpError(404, '版本不存在');
+          return sendJson(res, 200, {
+            id: v.id,
+            kind: v.kind,
+            label: v.label,
+            content: v.content,
+            size: v.size,
+            sha256: v.content_sha256,
+            created_at: v.created_at,
+          });
+        }
+        if (req.method === 'DELETE') return sendJson(res, 200, deleteSnapshot(uid, vid));
+      }
+      const versionsMatch = url.match(/^\/api\/docs\/([^/]+)\/versions(?:\?(.*))?$/);
+      if (versionsMatch) {
+        const doc = resolveDocRef(uid, versionsMatch[1]);
+        if (!doc) throw new HttpError(404, '文档不存在');
+        if (req.method === 'GET') {
+          const q = new URLSearchParams(versionsMatch[2] || '');
+          const kind = q.get('kind');
+          return sendJson(
+            res,
+            200,
+            listVersions(uid, doc.id, {
+              limit: Number(q.get('limit') || 50),
+              cursor: q.get('cursor') ? Number(q.get('cursor')) : undefined,
+              kind: kind === 'auto' || kind === 'manual' ? kind : undefined,
+            }),
+          );
+        }
+        if (req.method === 'POST') {
+          const b = await readJson(req).catch(() => ({}) as any);
+          return sendJson(res, 200, createSnapshot(uid, doc.id, b?.label));
+        }
+      }
+
+      // ─── 留存策略（FR-23）─────────────────────────────────
+      if (/^\/api\/settings\/retention(?:\?.*)?$/.test(url)) {
+        if (req.method === 'GET') return sendJson(res, 200, getRetention(uid));
+        if (req.method === 'PUT') {
+          const b = await readJson(req);
+          if (b == null || typeof b !== 'object') throw new HttpError(400, '请求体不是对象');
+          return sendJson(res, 200, setRetention(uid, b));
+        }
       }
 
       if (url === '/api/docs' && req.method === 'POST') {
@@ -187,9 +258,8 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       }
       const shareDelMatch = url.match(/^\/api\/share\/(\d+)$/);
       if (shareDelMatch && req.method === 'DELETE') {
-        const id = Number(shareDelMatch[1]);
-        if (!getShare(uid, id)) return sendJson(res, 404, { error: '不存在' });
-        return sendJson(res, 200, deleteShare(uid, id));
+        // 已由 archiveApiMiddleware 接管（含 ?purge=1 彻底删除）
+        return next();
       }
 
       const mediaListMatch = url.match(/^\/api\/media(?:\?.*)?$/);
