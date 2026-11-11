@@ -1,7 +1,7 @@
 import type { Connect } from 'vite';
 import { buildShareHtmlDoc } from '../core/share-html';
-import { deleteFromQiniu } from './qiniu-uploader';
-import { requireUserStorage } from './storage';
+import { deleteFromQiniu, resignPrivateUrls } from './qiniu-uploader';
+import { optionalUserStorage, requireUserStorage } from './storage';
 import { HttpError, readJson, sendJson } from './http';
 import { requireUser } from './auth';
 import {
@@ -43,6 +43,12 @@ import {
 } from './db';
 import { parseStorageInput, saveVerifiedProfile, toPublicProfile, verifyConnectivity } from './storage';
 import { syncArchiveToQdrant } from './archive-qdrant';
+
+/** 私有空间下库里的图片链接是上传当时签的，输出前现签一遍（公开空间原样返回）。 */
+function freshUrls(userId: number, text: string): string {
+  const cfg = optionalUserStorage(userId);
+  return cfg ? resignPrivateUrls(text, cfg) : text;
+}
 
 /**
  * 文档/分享/媒体/存储 REST 接口。除公开静态资源外均需登录，数据按 Current User 隔离。
@@ -86,7 +92,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         }
         res.statusCode = 200;
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(buildShareHtmlDoc(share.share_md));
+        res.end(buildShareHtmlDoc(freshUrls(uid, share.share_md)));
         return;
       }
 
@@ -267,7 +273,12 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         const u = new URL(url, 'http://localhost');
         const q = u.searchParams.get('q') || undefined;
         const source = u.searchParams.get('source') || undefined;
-        return sendJson(res, 200, listMedia(uid, q, source));
+        const rows = listMedia(uid, q, source);
+        const cfg = optionalUserStorage(uid);
+        if (cfg?.privateBucket) {
+          for (const r of rows) r.url = resignPrivateUrls(r.url, cfg);
+        }
+        return sendJson(res, 200, rows);
       }
       const mediaDelMatch = url.match(/^\/api\/media\/(\d+)$/);
       if (mediaDelMatch && req.method === 'DELETE') {

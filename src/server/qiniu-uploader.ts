@@ -143,3 +143,20 @@ export function makePrivateUrl(
   // token 格式必须是 <AccessKey>:<Sign>，反过来七牛一律 401（与 SDK privateDownloadUrl 一致）
   return `${toSign}&token=${accessKey}:${safe}`;
 }
+
+/**
+ * 私有空间：落库的 url 是上传当时签的，过期即 401，所以输出前必须重签。
+ * 公开空间是恒等函数，不改变任何输出。
+ */
+export function resignPrivateUrls(text: string, config: QiniuConfig, nowMs = Date.now()): string {
+  if (!config.privateBucket || !text) return text;
+  const domain = config.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  if (!domain) return text;
+  const esc = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`((?:https?:)?//${esc}/)([^\\s"'()<>]+)`, 'g');
+  return text.replace(re, (_m, prefix: string, keyAndQuery: string) => {
+    // 整个 URL（含旧 ?e&token）归匹配，否则残留的旧 query 会接在新签名后面
+    const key = keyAndQuery.split('?')[0];
+    return makePrivateUrl(`${prefix}${key}`, config.accessKey, config.secretKey, config.urlTtl, nowMs);
+  });
+}
