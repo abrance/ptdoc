@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { HttpError } from './http.ts';
 
 let db: DatabaseSync | null = null;
@@ -329,6 +329,96 @@ function migrateArchiveSchema(): void {
   }
 }
 
+/** 归档产物（FR-19）schema 版本。低于该值时执行一次迁移并回写。 */
+export const ARCHIVE_ARTIFACTS_VERSION = 7;
+
+export function archiveToken(): string {
+  // 32 字节 → base64url 43 字符，不可猜（FR-16）
+  return randomBytes(32).toString('base64url');
+}
+
+function userVersion(): number {
+  const row = getDb().prepare('PRAGMA user_version').get() as { user_version?: number } | undefined;
+  return Number(row?.user_version ?? 0);
+}
+
+/**
+ * FR-19：把 shares 演进为唯一产物表。
+ * 幂等（PRAGMA user_version 挡住）；迁移前备份数据库；不删任何行。
+ */
+function migrateArchiveArtifacts(dbFilePath: string): void {
+  if (userVersion() >= ARCHIVE_ARTIFACTS_VERSION) return;
+  const d = getDb();
+  try {
+    if (existsSync(dbFilePath)) {
+      const bak = `${dbFilePath}.bak-${Date.now()}`;
+      copyFileSync(dbFilePath, bak);
+      console.log(`[db] 归档产物迁移前已备份数据库：${bak}`);
+    }
+  } catch (e) {
+    console.warn('[db] 归档产物迁移前备份失败：' + (e as Error).message);
+  }
+
+  const addColumn = (sql: string): void => {
+    try {
+      d.exec(sql);
+    } catch {
+      /* 列已存在则忽略 */
+    }
+  };
+  addColumn("ALTER TABLE shares ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+  addColumn('ALTER TABLE shares ADD COLUMN source_content_sha256 TEXT');
+  addColumn("ALTER TABLE shares ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  addColumn('ALTER TABLE shares ADD COLUMN note TEXT');
+  addColumn('ALTER TABLE shares ADD COLUMN md_size INTEGER');
+  addColumn('ALTER TABLE shares ADD COLUMN html_size INTEGER');
+  addColumn("ALTER TABLE shares ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'share'");
+  addColumn('ALTER TABLE shares ADD COLUMN superseded_at INTEGER');
+  addColumn('ALTER TABLE shares ADD COLUMN deleted_at INTEGER');
+  // 彻底删除需要对象存储 key；URL 里解析不可靠，单独存（FR-19 列清单的补充）
+  addColumn('ALTER TABLE shares ADD COLUMN md_key TEXT');
+  addColumn('ALTER TABLE shares ADD COLUMN html_key TEXT');
+  addColumn('ALTER TABLE docs ADD COLUMN archive_token TEXT');
+
+  // 1) 按 (user_id, doc_key) 分组、created_at 升序编号 version=1..n
+  d.exec(`
+    UPDATE shares SET version = (
+      SELECT t.rn FROM (
+        SELECT id, ROW_NUMBER() OVER (
+          PARTITION BY user_id, doc_key ORDER BY created_at ASC, id ASC
+        ) AS rn FROM shares
+      ) t WHERE t.id = shares.id
+    )
+  `);
+  // 2) 无 doc_key 的历史行不归属任何文档，一律 superseded
+  d.exec("UPDATE shares SET status='superseded', superseded_at=created_at WHERE doc_key IS NULL OR doc_key=''");
+  // 3) 每个文档只保留最新一条 active
+  d.exec(`
+    UPDATE shares SET status='superseded', superseded_at=created_at
+    WHERE status='active' AND doc_key IS NOT NULL AND doc_key != '' AND id NOT IN (
+      SELECT t.id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+          PARTITION BY user_id, doc_key ORDER BY created_at DESC, id DESC
+        ) AS rn FROM shares WHERE doc_key IS NOT NULL AND doc_key != ''
+      ) t WHERE t.rn = 1
+    )
+  `);
+  d.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_shares_active ON shares(user_id, doc_key) WHERE status='active'");
+  // 4) 只给已有分享的文档回填 token（D10），其余首次归档时生成
+  const needToken = d
+    .prepare(
+      `SELECT DISTINCT d.id FROM docs d
+       JOIN shares s ON s.user_id = d.user_id AND s.doc_key = d.doc_key
+       WHERE d.archive_token IS NULL`,
+    )
+    .all() as Array<{ id: number }>;
+  const setToken = d.prepare('UPDATE docs SET archive_token=? WHERE id=?');
+  for (const row of needToken) setToken.run(archiveToken(), row.id);
+  d.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_docs_archive_token ON docs(archive_token) WHERE archive_token IS NOT NULL');
+
+  d.exec(`PRAGMA user_version = ${ARCHIVE_ARTIFACTS_VERSION}`);
+}
+
 function migrateApiTokenHash(): void {
   const d = getDb();
   if (!tableHasColumn('users', 'api_token_hash')) {
@@ -417,6 +507,7 @@ export function initDB(dbFile?: string): void {
   migrateAgentTables();
   migrateAgentCapabilityColumns();
   migrateArchiveSchema();
+  migrateArchiveArtifacts(file);
   migrateApiTokenHash();
 }
 
@@ -654,6 +745,7 @@ interface DocRow {
   content: string;
   created_at: number;
   updated_at: number;
+  archive_token?: string | null;
 }
 
 export interface DocSummary {
@@ -922,20 +1014,37 @@ export function insertShare(
   htmlUrl?: string,
 ): { id: number } {
   const now = Date.now();
-  const info = getDb()
-    .prepare(
-      'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, source_content_sha256, created_at) VALUES (?,?,?,?,?,?,?)',
-    )
-    .run(
-      userId,
-      docKey,
-      shareMd,
-      mdUrl ?? null,
-      htmlUrl ?? null,
-      htmlUrl ? contentSha256(userId, docKey) : null,
-      now,
-    );
-  const shareId = Number(info.lastInsertRowid);
+  // 兼容旧接口：沿用产物表的版本与状态语义，避免撞 ux_shares_active
+  const active = docKey ? getActiveArtifact(userId, docKey) : undefined;
+  const version = docKey ? maxArtifactVersion(userId, docKey) + 1 : 1;
+  const d = getDb();
+  d.exec('BEGIN');
+  let shareId: number;
+  try {
+    if (active) {
+      d.prepare("UPDATE shares SET status='superseded', superseded_at=? WHERE id=?").run(now, active.id);
+    }
+    const info = d
+      .prepare(
+        'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, source_content_sha256, created_at, version, status) VALUES (?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        userId,
+        docKey,
+        shareMd,
+        mdUrl ?? null,
+        htmlUrl ?? null,
+        htmlUrl ? contentSha256(userId, docKey) : null,
+        now,
+        version,
+        docKey ? 'active' : 'superseded',
+      );
+    shareId = Number(info.lastInsertRowid);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
   const stmt = getDb().prepare(
     'INSERT INTO images (share_id, qiniu_key, url, mermaid_hash, created_at) VALUES (?,?,?,?,?)',
   );
@@ -1019,6 +1128,287 @@ export function listShareImages(shareId: number): ShareImage[] {
   return getDb()
     .prepare('SELECT qiniu_key, url, mermaid_hash FROM images WHERE share_id=? ORDER BY id ASC')
     .all(shareId) as unknown as ShareImage[];
+}
+
+// ─── 归档产物（FR-15 ~ FR-20）──────────────────────────
+
+export type ArtifactStatus = 'active' | 'superseded' | 'deleted';
+
+export interface ArtifactRow {
+  id: number;
+  user_id: number;
+  doc_key: string | null;
+  share_md: string;
+  version: number;
+  status: ArtifactStatus;
+  source_kind: string;
+  note: string | null;
+  md_url: string | null;
+  html_url: string | null;
+  md_key: string | null;
+  html_key: string | null;
+  md_size: number | null;
+  html_size: number | null;
+  source_content_sha256: string | null;
+  created_at: number;
+  superseded_at: number | null;
+  deleted_at: number | null;
+}
+
+export function sha256Content(content: string): string {
+  return sha256Text(content);
+}
+
+/** 归档相关接口的路径参数既可是数字 doc id，也可是 doc_key（URL 里带 / 的 key 只能是转义形式）。 */
+export function resolveDocRef(userId: number, ref: string | number): DocRow | undefined {
+  let s = String(ref);
+  if (s.includes('%')) {
+    try {
+      s = decodeURIComponent(s);
+    } catch {
+      // 非法转义按原文查找，交给调用方走 404
+    }
+  }
+  if (/^\d+$/.test(s)) {
+    const byId = getDoc(userId, Number(s));
+    if (byId) return byId;
+  }
+  return getDocByKey(userId, s);
+}
+
+export function getActiveArtifact(userId: number, docKey: string): ArtifactRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status='active'")
+    .get(userId, docKey) as unknown as ArtifactRow | undefined;
+}
+
+export function maxArtifactVersion(userId: number, docKey: string): number {
+  const row = getDb()
+    .prepare('SELECT COALESCE(MAX(version), 0) AS v FROM shares WHERE user_id=? AND doc_key=?')
+    .get(userId, docKey) as { v: number } | undefined;
+  return Number(row?.v ?? 0);
+}
+
+export function getArtifact(userId: number, id: number): ArtifactRow | undefined {
+  return getDb().prepare('SELECT * FROM shares WHERE id=? AND user_id=?').get(id, userId) as unknown as
+    | ArtifactRow
+    | undefined;
+}
+
+/** 某文档的产物：active 在最前，历史按 version 倒序；默认不返回已彻底删除的行。 */
+export function listArtifacts(
+  userId: number,
+  docKey: string,
+  opts: { includeDeleted?: boolean } = {},
+): ArtifactRow[] {
+  const sql = opts.includeDeleted
+    ? 'SELECT * FROM shares WHERE user_id=? AND doc_key=? ORDER BY version DESC'
+    : "SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status!='deleted' ORDER BY version DESC";
+  return getDb().prepare(sql).all(userId, docKey) as unknown as ArtifactRow[];
+}
+
+export function findDocByArchiveToken(token: string): DocRow | undefined {
+  if (!token) return undefined;
+  return getDb().prepare('SELECT * FROM docs WHERE archive_token=?').get(token) as unknown as
+    | DocRow
+    | undefined;
+}
+
+/** 首次归档时生成，此后不轮换（D14）。 */
+export function ensureDocArchiveToken(userId: number, docId: number): string {
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '文档不存在');
+  if (doc.archive_token) return doc.archive_token;
+  const token = archiveToken();
+  getDb().prepare('UPDATE docs SET archive_token=? WHERE id=? AND user_id=?').run(token, docId, userId);
+  return token;
+}
+
+export function rotateDocArchiveToken(userId: number, docId: number): string {
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '文档不存在');
+  const token = archiveToken();
+  getDb().prepare('UPDATE docs SET archive_token=? WHERE id=? AND user_id=?').run(token, docId, userId);
+  return token;
+}
+
+export interface NewArtifact {
+  md: string;
+  mdUrl: string;
+  htmlUrl: string;
+  mdKey: string;
+  htmlKey: string;
+  mdSize: number;
+  htmlSize: number;
+  sourceContentSha256: string;
+  note?: string | null;
+  createdAt?: number;
+}
+
+/**
+ * 写入一次归档产物（FR-20）：旧 active → superseded，新行 version=max+1 且 active。
+ * 单个事务；文件已上传完成才调用，失败不留半成品行。
+ */
+export function insertArtifact(userId: number, docKey: string, input: NewArtifact): ArtifactRow {
+  const d = getDb();
+  const now = input.createdAt ?? Date.now();
+  let id = 0;
+  d.exec('BEGIN');
+  try {
+    d.prepare(
+      "UPDATE shares SET status='superseded', superseded_at=? WHERE user_id=? AND doc_key=? AND status='active'",
+    ).run(now, userId, docKey);
+    const version = maxArtifactVersion(userId, docKey) + 1;
+    const info = d
+      .prepare(
+        `INSERT INTO shares
+         (user_id, doc_key, share_md, md_url, html_url, md_key, html_key, md_size, html_size,
+          source_content_sha256, note, version, status, source_kind, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        userId,
+        docKey,
+        input.md,
+        input.mdUrl,
+        input.htmlUrl,
+        input.mdKey,
+        input.htmlKey,
+        input.mdSize,
+        input.htmlSize,
+        input.sourceContentSha256,
+        input.note ?? null,
+        version,
+        'active',
+        'archive',
+        now,
+      );
+    id = Number(info.lastInsertRowid);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return getArtifact(userId, id)!;
+}
+
+/** 置 deleted（默认保留对象存储文件；彻底删除由调用方先删对象再调这里）。 */
+export function markArtifactDeleted(userId: number, id: number): ArtifactRow {
+  const row = getArtifact(userId, id);
+  if (!row) throw new HttpError(404, '产物不存在');
+  if (row.status === 'deleted') return row;
+  getDb()
+    .prepare("UPDATE shares SET status='deleted', deleted_at=? WHERE id=? AND user_id=?")
+    .run(Date.now(), id, userId);
+  return getArtifact(userId, id)!;
+}
+
+export function getArtifactByVersion(userId: number, docKey: string, version: number): ArtifactRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM shares WHERE user_id=? AND doc_key=? AND version=? AND status!='deleted'")
+    .get(userId, docKey, version) as unknown as ArtifactRow | undefined;
+}
+
+export interface ArchiveStatus {
+  stale: boolean;
+  version: number;
+  updated_at: number | null;
+  token: string | null;
+}
+
+export function archiveStatusOf(userId: number, docKey: string): ArchiveStatus {
+  const doc = getDocByKey(userId, docKey);
+  const active = doc ? getActiveArtifact(userId, docKey) : undefined;
+  if (!doc || !active) {
+    return { stale: false, version: 0, updated_at: null, token: doc?.archive_token ?? null };
+  }
+  return {
+    stale: active.source_content_sha256 !== null && sha256Text(doc.content) !== active.source_content_sha256,
+    version: active.version,
+    updated_at: active.created_at,
+    token: doc.archive_token ?? null,
+  };
+}
+
+export interface ArchiveItem {
+  doc_id: number;
+  doc_key: string;
+  title: string;
+  version: number;
+  created_at: number;
+  stale: boolean;
+  token: string;
+  history_count: number;
+  note: string | null;
+}
+
+/** 归档列表：每文档一行（有 active 产物，或 includeAll 时含已删除产物的文档）。 */
+export function listArchiveItems(userId: number, q?: string, includeAll = false): { items: ArchiveItem[] } {
+  const rows = getDb()
+    .prepare(
+      `SELECT s.id, s.doc_key, s.version, s.status, s.created_at, s.note, s.source_content_sha256,
+              d.id AS doc_id, d.title, d.content, d.archive_token
+       FROM shares s JOIN docs d ON d.user_id = s.user_id AND d.doc_key = s.doc_key
+       WHERE s.user_id=? AND s.doc_key IS NOT NULL AND s.doc_key != '' AND s.status != 'deleted'
+       ORDER BY s.created_at DESC, s.id DESC`,
+    )
+    .all(userId) as Array<{
+    id: number;
+    doc_key: string;
+    version: number;
+    status: string;
+    created_at: number;
+    note: string | null;
+    source_content_sha256: string | null;
+    doc_id: number;
+    title: string;
+    content: string;
+    archive_token: string | null;
+  }>;
+
+  const byDoc = new Map<string, ArchiveItem & { history_count: number }>();
+  for (const r of rows) {
+    const existing = byDoc.get(r.doc_key);
+    const isActive = r.status === 'active';
+    if (!r.archive_token) continue; // 无 token 的存量文档不入列表（首次归档后出现）
+    if (existing) {
+      if (isActive) {
+        existing.version = r.version;
+        existing.created_at = r.created_at;
+        existing.note = r.note;
+        existing.stale =
+          r.source_content_sha256 !== null && sha256Content(r.content) !== r.source_content_sha256;
+      } else {
+        existing.history_count += 1;
+      }
+      continue;
+    }
+    if (!isActive && !includeAll) {
+      // 无 active 产物（已被删除）的文档默认不显示；includeAll 时用最新一条占位
+      continue;
+    }
+    byDoc.set(r.doc_key, {
+      doc_id: r.doc_id,
+      doc_key: r.doc_key,
+      title: r.title,
+      version: r.version,
+      created_at: r.created_at,
+      stale: isActive && r.source_content_sha256 !== null && sha256Content(r.content) !== r.source_content_sha256,
+      token: r.archive_token,
+      history_count: isActive ? 0 : 1,
+      note: r.note,
+    });
+  }
+
+  const needle = q?.trim().toLowerCase();
+  let items = [...byDoc.values()];
+  if (needle) {
+    items = items.filter(
+      (i) => i.title.toLowerCase().includes(needle) || i.doc_key.toLowerCase().includes(needle),
+    );
+  }
+  items.sort((a, b) => b.created_at - a.created_at);
+  return { items };
 }
 
 // ─── mermaid -> 已上传图片 的按用户缓存（按内容哈希去重）──

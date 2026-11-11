@@ -1,4 +1,4 @@
-import { renderMarkdown } from './markdown';
+import { renderMarkdown } from './markdown.ts';
 
 /**
  * 把 Markdown 渲染为自包含 HTML 文档（基础排版样式内联，图片为远程 URL）。
