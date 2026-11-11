@@ -1,3 +1,5 @@
+import { initRetentionSection, retentionSectionHtml } from './retention';
+
 interface StoragePublic {
   access_key: string;
   bucket: string;
@@ -10,13 +12,14 @@ interface StoragePublic {
 }
 
 /** 设置分区 id（Sider 导航、抽屉手风琴共用） */
-const SECTIONS = ['storage', 'llm', 'qdrant', 'password', 'token'] as const;
+const SECTIONS = ['storage', 'llm', 'qdrant', 'retention', 'password', 'token'] as const;
 export type SettingsSectionId = (typeof SECTIONS)[number];
 
 const SECTION_TITLES: Record<SettingsSectionId, string> = {
   storage: '对象存储（七牛云）',
   llm: '大模型（OpenAI 兼容）',
   qdrant: '知识库（Qdrant）',
+  retention: '版本留存策略',
   password: '修改密码',
   token: 'API Token',
 };
@@ -43,6 +46,8 @@ export function initSettingsPanel(opts: {
   // 设置手风琴渲染进设置主界面容器（#settings-main-area），不再是抽屉
   const root = (): HTMLElement | null => document.getElementById('settings-main-area');
   let built = false;
+  // 留存策略分区的读取入口（分区体在 bindSectionActions 里初始化）
+  let retentionFill: (() => Promise<void>) | null = null;
   // 各分区「已配置」状态（驱动 Sider 状态灯与分区圆点）
   const configured = settingsConfigured as Record<SettingsSectionId, boolean | undefined>;
 
@@ -131,6 +136,7 @@ export function initSettingsPanel(opts: {
         <label>API Key<input name="qdrant_api_key" type="password" autocomplete="off" /></label>
         <div class="settings-ops"><button type="button" id="qdrant-save" class="btn-primary">保存知识库</button></div>
       </form>`;
+    body('retention').innerHTML = retentionSectionHtml();
     body('password').innerHTML = `
       <form id="password-form" class="settings-form">
         <label>原密码<input name="old_password" type="password" autocomplete="current-password" /></label>
@@ -149,6 +155,7 @@ export function initSettingsPanel(opts: {
   };
 
   const bindSectionActions = (): void => {
+    retentionFill = initRetentionSection({ onStatus: opts.onStatus }).fill;
     document.getElementById('storage-test')!.addEventListener('click', () => void test());
     document.getElementById('password-save')!.addEventListener('click', () => void changePassword());
     document.getElementById('llm-save')!.addEventListener('click', () => void saveLlm());
@@ -395,7 +402,8 @@ export function initSettingsPanel(opts: {
     // 打开设置主界面并展开指定分区（Sider 配置项导航回调）
     openSection: (section: SettingsSectionId): void => {
       ensure();
-      void fill().then(() => {
+      const load = section === 'retention' && retentionFill ? retentionFill : fill;
+      void load().then(() => {
         const host = root()!;
         host.querySelectorAll('.settings-section').forEach((x) => ((x as HTMLDetailsElement).open = false));
         const target = host.querySelector(`.settings-section[data-section="${section}"]`) as HTMLDetailsElement | null;

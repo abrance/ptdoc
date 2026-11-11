@@ -6,6 +6,7 @@ import {
   getArtifactByVersion,
   getDocByKey,
   getActiveArtifact,
+  listArchive,
   listArchiveItems,
   listArtifacts,
   markArtifactDeleted,
@@ -144,8 +145,12 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         const q = u.searchParams.get('q') || undefined;
         const includeAll = u.searchParams.get('include') === 'all';
         const { items } = listArchiveItems(uid, q, includeAll);
+        // 侧边栏归档树仍读 {entries, folders}（归档路径树）；items 供归档产物列表用，两者并存避免两套调用方互踢
+        const { entries, folders } = listArchive(uid, q);
         return sendJson(res, 200, {
           items: items.map((i) => ({ ...i, public_url: `/a/${i.token}` })),
+          entries,
+          folders,
         });
       }
 

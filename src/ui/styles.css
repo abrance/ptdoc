@@ -2260,7 +2260,67 @@ body.toc-on .preview-pane {
   font-size: 12px;
 }
 
-#snap-preview-text {
+.snap-ops button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.version-filter {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.version-filter button {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.version-filter button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.version-badge {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.version-badge.kind-manual {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.version-more {
+  padding: 8px;
+  text-align: center;
+}
+
+.version-preview-meta {
+  margin: 0;
+  padding: 0 16px 8px;
+}
+
+#snap-preview-text,
+#version-preview-text {
   flex: 1;
   min-height: 300px;
   border: 0;
