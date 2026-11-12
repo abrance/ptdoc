@@ -9,6 +9,7 @@ import { hashToken } from './auth.ts';
 import { loadServerEnv } from './env.ts';
 import { apiMiddleware } from './api.ts';
 import { archiveApiMiddleware } from './archive-api.ts';
+import { hasBareDocKeySlash } from './http.ts';
 
 // FR-25：GET /api/docs/ops/a.md/archive-status 曾落到 GET /api/docs 列表路由，返回 200 + 文档列表。
 
@@ -87,4 +88,33 @@ test('FR-25 单段/纯数字 id/列表路由行为不变，多段合法路由不
   assert.equal(snaps.res.statusCode, 200);
   assert.ok(Array.isArray(snaps.json()));
   closeDB();
+});
+
+test('FR-25 尾段白名单：api.ts / archive-api.ts 的 12 种合法子路由全部放行，裸斜杠全部判非法', async () => {
+  // 与 DOC_REF_TAILS_RE 一一对应；新增 /api/docs/:id/* 路由时这里和正则要一起加
+  const tails = [
+    'rename',
+    'archive',
+    'archive-status',
+    'archive/rotate-token',
+    'archive-path',
+    'qdrant-sync',
+    'snapshots',
+    'snapshots/3',
+    'snapshots/3/restore',
+    'versions',
+    'versions/2',
+    'versions/2/restore',
+  ];
+  for (const tail of tails) {
+    assert.equal(hasBareDocKeySlash(`/api/docs/7/${tail}`), false, `合法子路由被误判：/${tail}`);
+    assert.equal(hasBareDocKeySlash(`/api/docs/ops/a.md/${tail}`), true, `裸斜杠漏判：/ops/a.md/${tail}`);
+  }
+  // 转义形式、单段、列表路由都不受影响
+  assert.equal(hasBareDocKeySlash('/api/docs/ops%2Fa.md/archive-status'), false);
+  assert.equal(hasBareDocKeySlash('/api/docs/7'), false);
+  assert.equal(hasBareDocKeySlash('/api/docs?q=ops'), false);
+  assert.equal(hasBareDocKeySlash('/a/tok123'), false);
+  // 带 query 的裸斜杠同样判非法
+  assert.equal(hasBareDocKeySlash('/api/docs/ops/a.md/archive-status?x=1'), true);
 });

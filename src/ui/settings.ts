@@ -238,7 +238,9 @@ export function initSettingsPanel(opts: {
       if (!res.ok) throw new Error(j.error || '自检失败');
       hint.textContent = j.ok
         ? `HEAD ${j.status}：${j.hint || '签名可用'}`
-        : `HEAD ${j.status || '失败'}：${j.hint || '签名不可用'}`;
+        : j.status
+          ? `HEAD ${j.status}：${j.hint || '签名不可用'}`
+          : j.hint || '自检失败';
     } catch (e) {
       hint.textContent = '自检失败：' + (e as Error).message;
     }

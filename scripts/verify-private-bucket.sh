@@ -83,7 +83,9 @@ trap cleanup EXIT
 FAILED=0
 
 # ── 七牛签名工具 ──────────────────────────────────────────
-b64url() { base64 | tr '+/' '-_' | tr -d '='; }
+# -w0：不加会按 76 列折行，policy 编码后 >76 字符时 token 里会夹换行
+# 保留 '=' 填充：与七牛 SDK（util.base64ToUrlSafe 只替换 +/）逐字节一致
+b64url() { base64 -w0 | tr '+/' '-_'; }
 hmac_sha1_b64url() { printf '%s' "$1" | openssl dgst -sha1 -hmac "$SK" -binary | b64url; }
 
 # 私有下载 URL：<domain>/<key>?e=<deadline>&token=<ak>:<sign(上面整串)>
@@ -92,14 +94,16 @@ private_url() { # key ttl_seconds
   e=$(( $(date +%s) + ttl ))
   url="${DOMAIN%/}/${key}?e=${e}"
   sign="$(hmac_sha1_b64url "$url")"
-  printf '%s:%s' "$url" "${AK}:${sign}"
+  # 格式与 src/server/qiniu-uploader.ts makePrivateUrl 一致：<url>?e=<deadline>&token=<ak>:<sign>
+  printf '%s&token=%s:%s' "$url" "$AK" "$sign"
 }
 
-mgmt_auth() { # path body
-  local sign_data="$1" body="${2:-}" sign
-  [ -n "$body" ] && sign_data="${sign_data}
+# 七牛管理 API 签名串恒为 "<path>\n<body>"（见 qiniu/util.js generateAccessToken：body 为空也保留换行）
+mgmt_auth() { # path [body]
+  local access="$1" body="${2:-}" sign
+  access="${access}
 ${body}"
-  sign="$(printf '%s' "$sign_data" | openssl dgst -sha1 -hmac "$SK" -binary | b64url)"
+  sign="$(printf '%s' "$access" | openssl dgst -sha1 -hmac "$SK" -binary | b64url)"
   printf 'QBox %s:%s' "$AK" "$sign"
 }
 
@@ -119,7 +123,9 @@ printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/
 IMG_KEY="ptdoc-verify/probe-$(date +%s).png"
 DEADLINE=$(( $(date +%s) + 3600 ))
 PUT_POLICY="{\"scope\":\"${BUCKET}:${IMG_KEY}\",\"deadline\":${DEADLINE},\"insertOnly\":1}"
-UP_TOKEN="$(printf '%s' "$PUT_POLICY" | b64url):$(hmac_sha1_b64url "$PUT_POLICY")"
+# 七牛上传凭证格式：<AccessKey>:<sign(encodedPolicy)>:<encodedPolicy>
+UP_POLICY_ENCODED="$(printf '%s' "$PUT_POLICY" | b64url)"
+UP_TOKEN="${AK}:$(hmac_sha1_b64url "$UP_POLICY_ENCODED"):${UP_POLICY_ENCODED}"
 
 UP_RES="$(curl -sS -m 30 -w '\n%{http_code}' -X POST "https://${UP_HOST}/" \
   -F "token=${UP_TOKEN}" -F "key=${IMG_KEY}" -F "file=@${WORK}/probe.png")" ||
@@ -179,9 +185,12 @@ fi
 
 # ── 4. 建文档 + 归档 ─────────────────────────────────────
 say "== 4/6 归档一篇引用该图片的测试文档"
-# 文档里放一张短签名图（300s），归档后 HTML 里的签名必须由 ptdoc 用当前配置重签成新 deadline
+# 文档图单独签一个短 TTL：要能在后面的等待窗口内真的过期（用 300s 那个会等到天荒地老）
+DOC_IMG_TTL=30
+DOC_IMG_EXP=$(( $(date +%s) + DOC_IMG_TTL ))
+DOC_SIGNED_URL="$(private_url "$IMG_KEY" "$DOC_IMG_TTL")"
 DOC_BODY="$(printf '{"doc_key":"%s","title":"私有空间验收","content":"# 私有空间验收\\n\\n![probe](%s)\\n"}' \
-  "$DOC_KEY" "$SIGNED_URL")"
+  "$DOC_KEY" "$DOC_SIGNED_URL")"
 DOC_CODE="$(curl -sS -o "$WORK/doc.json" -m 20 -w '%{http_code}' -b "$JAR" \
   -X POST "$BASE_URL/api/docs" -H 'Content-Type: application/json' -d "$DOC_BODY")"
 [ "$DOC_CODE" = "200" ] || die "建文档失败 HTTP ${DOC_CODE}：$(cat "$WORK/doc.json")"
@@ -197,9 +206,10 @@ TOKEN="$(sed -nE 's/.*"token":"([^"]+)".*/\1/p' "$WORK/archive.json" | head -1)"
 ok "已归档 doc_id=${DOC_ID} token=${TOKEN}"
 
 # ── 5. 等过期：文档里那张图的签名必须已经失效 ─────────────
-say "== 5/6 等 ${TTL}s 让文档里原始图片签名过期"
-sleep "$TTL"
-EXPIRED_CODE="$(curl -sS -o /dev/null -m 15 -w '%{http_code}' -I "$SIGNED_URL")"
+say "== 5/6 等文档里那张图的签名过期（签了 ${DOC_IMG_TTL}s）"
+WAIT=$(( DOC_IMG_EXP - $(date +%s) + 6 ))
+[ "$WAIT" -gt 0 ] && sleep "$WAIT"
+EXPIRED_CODE="$(curl -sS -o /dev/null -m 15 -w '%{http_code}' -I "$DOC_SIGNED_URL")"
 if [ "$EXPIRED_CODE" = "401" ] || [ "$EXPIRED_CODE" = "403" ]; then
   ok "原图签名已过期 → ${EXPIRED_CODE}（如果页面不做重签，图就该挂）"
 else
@@ -236,13 +246,13 @@ fi
 
 # ── 清理 ────────────────────────────────────────────────
 if [ "$KEEP" = 0 ]; then
-  say "== 清理上传的探针图"
+  say "== 清理测试文档与上传的探针图"
+  curl -sS -o /dev/null -m 20 -b "$JAR" -X DELETE "$BASE_URL/api/docs/${DOC_ID}" ||
+    say "  （测试文档 doc_id=${DOC_ID} 未删掉，可手动清）"
   ENTRY="$(printf '%s:%s' "$BUCKET" "$IMG_KEY" | b64url)"
-  DEL_BODY="entry=${ENTRY}&bucket=${BUCKET}"
-  curl -sS -o /dev/null -m 20 -X POST "https://rs.qiniu.com/delete" \
-    -H "Authorization: $(mgmt_auth "/delete" "$DEL_BODY")" \
-    -H 'Content-Type: application/x-www-form-urlencoded' \
-    --data "$DEL_BODY" || say "  （删除失败，可手动清 ${IMG_KEY}）"
+  curl -sS -o /dev/null -m 20 -X POST "https://rs.qiniu.com/delete/${ENTRY}" \
+    -H "Authorization: $(mgmt_auth "/delete/${ENTRY}")" ||
+    say "  （删除失败，可手动清 ${BUCKET}:${IMG_KEY}）"
 else
   say "== --keep：保留 ${IMG_KEY}"
 fi
