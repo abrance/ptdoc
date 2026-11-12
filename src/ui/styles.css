@@ -1128,12 +1128,6 @@ body.sidebar-collapsed .sidebar {
   border-color: var(--success-line);
 }
 
-.ar-status.is-stale {
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-color: var(--warning-line);
-}
-
 .ar-time {
   flex: none;
   font-size: 12px;
@@ -1155,6 +1149,58 @@ body.sidebar-collapsed .sidebar {
 
 .ar-ops button.is-danger {
   color: var(--danger);
+}
+
+/* 归档列表页：待重新归档提示 + 知识库三态徽标（原侧栏归档树样式迁入） */
+.ar-stale {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid var(--warning-line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.ar-qdrant {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.ar-qdrant-none {
+  color: var(--neutral-fg);
+  background: var(--neutral-soft);
+}
+
+.ar-qdrant-stale {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.ar-qdrant-synced {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.ar-ops button.ar-qdrant-btn {
+  flex-shrink: 0;
+  gap: 2px;
+  width: auto;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.ar-ops button.ar-qdrant-btn .icon {
+  width: 12px;
+  height: 12px;
 }
 
 .ar-history {
@@ -1477,76 +1523,6 @@ body.resizing {
   padding: 8px 6px;
 }
 
-/* ─── 归档折叠区（文档页底部）───────────────── */
-.archive-section {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border);
-}
-
-.archive-header {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 10px 0;
-}
-
-.archive-toggle {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 32px;
-  padding: 6px 8px;
-  border: 0;
-  background: transparent;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg);
-  cursor: pointer;
-  user-select: none;
-  transition: background-color var(--ease);
-}
-
-.archive-toggle:hover {
-  background: var(--surface);
-}
-
-.archive-toggle .tree-caret {
-  width: 14px;
-  height: 14px;
-  transition: transform 0.18s ease;
-}
-
-.archive-toggle .nav-count {
-  flex-shrink: 0;
-}
-
-#archive-new-folder {
-  width: 28px;
-  min-width: 28px;
-}
-
-.archive-tree {
-  flex: 0 1 42%;
-  min-height: 0;
-  overflow: auto;
-  padding: 4px 6px 8px;
-}
-
-.archive-section.collapsed .archive-tree,
-.archive-section.collapsed #archive-new-folder {
-  display: none;
-}
-
-/* collapsed 时 caret 与归档树 caret 同一旋转语义 */
-.archive-section.collapsed .archive-toggle .tree-caret {
-  transform: rotate(-90deg);
-}
-
 .sidebar-tree .tree-root,
 .tree-children {
   list-style: none;
@@ -1713,56 +1689,6 @@ body.resizing {
 
 .tree-doc.current .tree-doc-icon {
   color: var(--accent);
-}
-
-.tree-stale {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-radius: 999px;
-  padding: 1px 6px;
-  white-space: nowrap;
-}
-
-.tree-qdrant {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 999px;
-  padding: 1px 6px;
-  white-space: nowrap;
-}
-
-.tree-qdrant-none {
-  color: var(--neutral-fg);
-  background: var(--neutral-soft);
-}
-
-.tree-qdrant-stale {
-  color: var(--warning);
-  background: var(--warning-soft);
-}
-
-.tree-qdrant-synced {
-  color: var(--success);
-  background: var(--success-soft);
-}
-
-.tree-qdrant-btn {
-  flex-shrink: 0;
-  gap: 2px;
-  width: auto;
-  padding: 0 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.tree-qdrant-btn .icon {
-  width: 12px;
-  height: 12px;
 }
 
 .tree-ops {

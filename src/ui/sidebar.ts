@@ -10,27 +10,6 @@ interface SidebarDoc {
   filename: string;
 }
 
-interface ArchiveEntry {
-  id: number;
-  doc_key: string;
-  title: string;
-  archive_path: string;
-  share_id: number;
-  html_url: string;
-  md_url: string | null;
-  created_at: number;
-  stale: boolean;
-  qdrant_sync: 'none' | 'synced' | 'stale';
-}
-
-interface ArchiveFolder {
-  id: number;
-  path: string;
-}
-
-type SidebarMode = 'draft' | 'archive';
-type QdrantSyncStatus = 'none' | 'synced' | 'stale';
-
 interface FolderNode {
   type: 'folder';
   name: string;
@@ -38,7 +17,7 @@ interface FolderNode {
   children: TreeNode[];
 }
 
-type TreeDoc = SidebarDoc & { path: string; html_url?: string; stale?: boolean; qdrant_sync?: QdrantSyncStatus };
+type TreeDoc = SidebarDoc & { path: string };
 type TreeNode = FolderNode | { type: 'doc'; doc: TreeDoc };
 
 interface SidebarOptions {
@@ -95,59 +74,25 @@ function buildTree(docs: TreeDoc[], extraFolders: string[] = []): TreeNode[] {
   return roots;
 }
 
-function qdrantBadge(mode: SidebarMode, status?: QdrantSyncStatus): string {
-  if (mode !== 'archive' || !status) return '';
-  const label = status === 'synced' ? '已同步' : status === 'stale' ? '待同步' : '未同步';
-  const title =
-    status === 'synced'
-      ? '归档 Markdown 已写入知识库'
-      : status === 'stale'
-        ? '归档已更新，知识库仍是旧版'
-        : '尚未写入知识库';
-  return `<span class="tree-qdrant tree-qdrant-${status}" title="${title}">${label}</span>
-    <button class="tree-op tree-qdrant-btn" data-op="qdrant-sync" type="button" title="同步到知识库" aria-label="同步到知识库">
-      <svg class="icon"><use href="#i-sync"></use></svg>同步
-    </button>`;
-}
-
-function renderDoc(doc: TreeDoc, currentKey: string, mode: SidebarMode): HTMLLIElement {
+function renderDoc(doc: TreeDoc, currentKey: string): HTMLLIElement {
   const li = document.createElement('li');
   li.className = 'tree-doc' + (doc.doc_key === currentKey ? ' current' : '');
   li.dataset.docId = String(doc.id);
-  if (doc.html_url) li.dataset.htmlUrl = doc.html_url;
-  const stale = mode === 'archive' && doc.stale
-    ? '<span class="tree-stale" title="草稿已改，尚未重新生成分享版">有未发布改动</span>'
-    : '';
-  const qdrant = qdrantBadge(mode, doc.qdrant_sync);
-  const ops =
-    mode === 'archive'
-      ? `<button class="tree-op" data-op="move" title="移动" aria-label="移动"><svg class="icon"><use href="#i-pencil"></use></svg></button>
-         <button class="tree-op" data-op="open-src" title="打开原稿" aria-label="打开原稿"><svg class="icon"><use href="#i-doc"></use></svg></button>
-         <button class="tree-op" data-op="copy" title="复制链接" aria-label="复制链接"><svg class="icon"><use href="#i-link"></use></svg></button>`
-      : `<button class="tree-op" data-op="rename" title="重命名" aria-label="重命名"><svg class="icon"><use href="#i-pencil"></use></svg></button>
+  const ops = `<button class="tree-op" data-op="rename" title="重命名" aria-label="重命名"><svg class="icon"><use href="#i-pencil"></use></svg></button>
          <button class="tree-op" data-op="delete" title="删除" aria-label="删除"><svg class="icon"><use href="#i-trash"></use></svg></button>`;
   li.innerHTML = `
     <svg class="icon tree-doc-icon"><use href="#i-doc"></use></svg>
-    <span class="tree-label" title="${esc(mode === 'archive' ? doc.path : doc.doc_key)}">${esc(doc.title)}</span>
-    ${stale}
-    ${qdrant}
+    <span class="tree-label" title="${esc(doc.doc_key)}">${esc(doc.title)}</span>
     <span class="tree-ops">
       ${ops}
     </span>`;
   return li;
 }
 
-function renderFolder(folder: FolderNode, currentKey: string, mode: SidebarMode): HTMLLIElement {
+function renderFolder(folder: FolderNode, currentKey: string): HTMLLIElement {
   const li = document.createElement('li');
   li.className = 'tree-folder open';
   li.dataset.folderPath = folder.path;
-  const folderOps =
-    mode === 'archive'
-      ? `<span class="tree-ops">
-           <button class="tree-op" data-op="folder-rename" title="重命名" aria-label="重命名文件夹"><svg class="icon"><use href="#i-pencil"></use></svg></button>
-           <button class="tree-op" data-op="folder-delete" title="删除" aria-label="删除文件夹"><svg class="icon"><use href="#i-trash"></use></svg></button>
-         </span>`
-      : '';
   li.innerHTML = `
     <div class="tree-folder-row">
       <span class="tree-folder-label">
@@ -157,20 +102,19 @@ function renderFolder(folder: FolderNode, currentKey: string, mode: SidebarMode)
         <svg class="icon tree-folder-icon"><use href="#i-folder"></use></svg>
         <span class="tree-name">${esc(folder.name)}</span>
       </span>
-      ${folderOps}
     </div>`;
   const ul = document.createElement('ul');
   ul.className = 'tree-children';
   for (const c of folder.children) {
-    if (c.type === 'folder') ul.appendChild(renderFolder(c, currentKey, mode));
-    else ul.appendChild(renderDoc(c.doc, currentKey, mode));
+    if (c.type === 'folder') ul.appendChild(renderFolder(c, currentKey));
+    else ul.appendChild(renderDoc(c.doc, currentKey));
   }
   li.appendChild(ul);
   return li;
 }
 
-function renderFlat(docs: TreeDoc[], currentKey: string, mode: SidebarMode): HTMLLIElement[] {
-  return docs.map((d) => renderDoc(d, currentKey, mode));
+function renderFlat(docs: TreeDoc[], currentKey: string): HTMLLIElement[] {
+  return docs.map((d) => renderDoc(d, currentKey));
 }
 
 // ─── 初始化侧边栏 ────────────────────────────────────────────
@@ -181,32 +125,11 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   const newBtn = document.getElementById('sidebar-new') as HTMLButtonElement;
   const importBtn = document.getElementById('sidebar-import') as HTMLButtonElement;
 
-  const sidebarEl = document.getElementById('sidebar') as HTMLElement;
-  const archiveTreeEl = document.getElementById('archive-tree') as HTMLElement;
-  const archiveSectionEl = document.getElementById('archive-section') as HTMLElement;
-  const archiveToggleEl = document.getElementById('archive-toggle') as HTMLButtonElement;
-  const archiveCountEl = document.getElementById('archive-count') as HTMLElement;
-  const archiveNewBtn = document.getElementById('archive-new-folder') as HTMLButtonElement;
-
-  let mode: SidebarMode = 'draft';
   let allDocs: SidebarDoc[] = [];
-  let archiveEntries: ArchiveEntry[] = [];
-  let archiveFolders: ArchiveFolder[] = [];
 
   const toDraftDocs = (docs: SidebarDoc[]): TreeDoc[] => docs.map((d) => ({ ...d, path: d.doc_key }));
-  const toArchiveDocs = (entries: ArchiveEntry[]): TreeDoc[] =>
-    entries.map((e) => ({
-      id: e.id,
-      doc_key: e.doc_key,
-      title: e.title,
-      filename: e.archive_path.slice(e.archive_path.lastIndexOf('/') + 1),
-      path: e.archive_path,
-      html_url: e.html_url,
-      stale: e.stale,
-      qdrant_sync: e.qdrant_sync,
-    }));
 
-  const paintTree = (target: HTMLElement, docs: TreeDoc[], extraFolders: string[], emptyHtml: string, treeMode: SidebarMode): void => {
+  const paintTree = (target: HTMLElement, docs: TreeDoc[], extraFolders: string[], emptyHtml: string): void => {
     const currentKey = opts.getCurrentKey();
     target.innerHTML = '';
     if (docs.length === 0 && extraFolders.length === 0) {
@@ -217,29 +140,18 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     ul.className = 'tree-root';
     const nodes = buildTree(docs, extraFolders);
     for (const n of nodes) {
-      if (n.type === 'folder') ul.appendChild(renderFolder(n, currentKey, treeMode));
-      else ul.appendChild(renderDoc(n.doc, currentKey, treeMode));
+      if (n.type === 'folder') ul.appendChild(renderFolder(n, currentKey));
+      else ul.appendChild(renderDoc(n.doc, currentKey));
     }
     target.appendChild(ul);
   };
 
   const paintDocs = (): void => {
-    paintTree(treeEl, toDraftDocs(allDocs), [], '<div class="tree-empty">暂无文档，点「新建」开始</div>', 'draft');
-  };
-
-  const paintArchive = (): void => {
-    archiveCountEl.textContent = String(archiveEntries.length);
-    paintTree(
-      archiveTreeEl,
-      toArchiveDocs(archiveEntries),
-      archiveFolders.map((f) => f.path),
-      '<div class="tree-empty">还没有归档。生成分享版并上传 HTML 后会出现在这里。</div>',
-      'archive',
-    );
+    paintTree(treeEl, toDraftDocs(allDocs), [], '<div class="tree-empty">暂无文档，点「新建」开始</div>');
   };
 
   /** 过滤态扁平渲染：搜索结果不重建文件夹层级，直接平铺。*/
-  const paintFlat = (target: HTMLElement, docs: TreeDoc[], flatMode: SidebarMode, emptyHtml: string): void => {
+  const paintFlat = (target: HTMLElement, docs: TreeDoc[], emptyHtml: string): void => {
     target.innerHTML = '';
     if (docs.length === 0) {
       target.innerHTML = emptyHtml;
@@ -247,7 +159,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }
     const ul = document.createElement('ul');
     ul.className = 'tree-root';
-    renderFlat(docs, opts.getCurrentKey(), flatMode).forEach((li) => ul.appendChild(li));
+    renderFlat(docs, opts.getCurrentKey()).forEach((li) => ul.appendChild(li));
     target.appendChild(ul);
   };
 
@@ -255,14 +167,6 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     const res = await fetch('/api/docs');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     allDocs = (await res.json()) as SidebarDoc[];
-  };
-
-  const refreshArchive = async (): Promise<void> => {
-    const res = await fetch('/api/archive');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = (await res.json()) as { entries: ArchiveEntry[]; folders: ArchiveFolder[] };
-    archiveEntries = data.entries;
-    archiveFolders = data.folders;
   };
 
   const refreshAndPaintDocs = async (): Promise<void> => {
@@ -274,73 +178,27 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }
   };
 
-  const refreshAndPaintArchive = async (): Promise<void> => {
-    try {
-      await refreshArchive();
-      paintArchive();
-    } catch {
-      archiveTreeEl.innerHTML = '<div class="tree-empty">加载失败</div>';
-    }
-  };
-
-  // 双树各自独立渲染，两棵树都刷新（归档树此前只在过滤框输入时才会画，切到归档页是空的）
   const refresh = async (): Promise<void> => {
-    await Promise.all([refreshAndPaintDocs(), refreshAndPaintArchive()]);
+    await refreshAndPaintDocs();
   };
 
-  // ─── 归档折叠区：默认折叠，状态记忆在 localStorage ──────────
-  const ARCHIVE_OPEN_KEY = 'ptdoc.sider-archive-open';
-  let archiveOpen = false;
-  try {
-    archiveOpen = localStorage.getItem(ARCHIVE_OPEN_KEY) === '1';
-  } catch {
-    /* 隐私模式禁用 localStorage：保持默认折叠 */
-  }
-  let archiveForceOpen = false; // 过滤词命中归档时临时展开，清词后恢复
-  const applyArchiveOpen = (): void => {
-    const open = archiveOpen || archiveForceOpen;
-    archiveSectionEl.classList.toggle('collapsed', !open);
-    archiveToggleEl.setAttribute('aria-expanded', String(open));
-  };
-  applyArchiveOpen();
-  archiveToggleEl.addEventListener('click', () => {
-    archiveOpen = !archiveOpen;
-    try {
-      localStorage.setItem(ARCHIVE_OPEN_KEY, archiveOpen ? '1' : '0');
-    } catch {
-      /* 隐私模式仅本次生效 */
-    }
-    applyArchiveOpen();
-  });
-
-  // 搜索：单过滤框同时过滤文档与归档（并行两个接口，各按扁平结果渲染）
+  // 搜索：过滤当前 space 下的文档，按扁平结果渲染
   searchEl.addEventListener('input', async () => {
     const q = searchEl.value.trim();
-    archiveForceOpen = Boolean(q);
-    applyArchiveOpen();
     if (!q) {
       paintDocs();
-      paintArchive();
       return;
     }
     try {
-      const [docsRes, archiveRes] = await Promise.all([
-        fetch('/api/docs?q=' + encodeURIComponent(q)),
-        fetch('/api/archive?q=' + encodeURIComponent(q)),
-      ]);
+      const docsRes = await fetch('/api/docs?q=' + encodeURIComponent(q));
       const docs = (await docsRes.json()) as SidebarDoc[];
-      const data = (await archiveRes.json()) as { entries: ArchiveEntry[]; folders: ArchiveFolder[] };
-      paintFlat(treeEl, toDraftDocs(docs), 'draft', '<div class="tree-empty">没有匹配的文档</div>');
-      paintFlat(archiveTreeEl, toArchiveDocs(data.entries), 'archive', '<div class="tree-empty">没有匹配的归档</div>');
+      paintFlat(treeEl, toDraftDocs(docs), '<div class="tree-empty">没有匹配的文档</div>');
     } catch {
       /* 忽略搜索失败 */
     }
   });
 
   newBtn.addEventListener('click', () => void createDoc());
-
-  // ─── 归档折叠区（文档 tab 底部）─────────────────────────
-  archiveNewBtn.addEventListener('click', () => void createFolder());
 
   // ─── 批量导入文件夹 ──────────────────────────────────
   importBtn.addEventListener('click', () => void importFolder());
@@ -477,79 +335,19 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }
   }
 
-  const createFolder = async (): Promise<void> => {
-    const path = await askText({
-      title: '新建文件夹',
-      label: '文件夹路径（如 项目/2026）',
-      value: '未命名文件夹',
-      confirmLabel: '创建',
-    });
-    if (!path || !path.trim()) return;
-    try {
-      const res = await fetch('/api/archive/folders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: path.trim() }),
-      });
-      if (!res.ok) throw new Error(await readError(res));
-      await refresh();
-    } catch (e) {
-      opts.onStatus?.('新建文件夹失败：' + (e as Error).message, true);
-    }
-  };
-
-  // 归档树点击委托（独立于文档树；行为：打开七牛链接 / 移动 / 原稿 / 复制 / 同步）
-  archiveTreeEl.addEventListener('click', async (e) => {
-    await onTreeClick(e, archiveTreeEl, 'archive');
-  });
-
   // 点击委托：打开文档 / 折叠文件夹 / 重命名 / 删除
   treeEl.addEventListener('click', async (e) => {
-    await onTreeClick(e, treeEl, 'draft');
+    await onTreeClick(e);
   });
 
-  async function onTreeClick(e: MouseEvent, scopeEl: HTMLElement, scopeMode: SidebarMode): Promise<void> {
+  async function onTreeClick(e: MouseEvent): Promise<void> {
     const target = e.target as HTMLElement;
     const opBtn = target.closest<HTMLElement>('.tree-op');
     if (opBtn) {
       const op = opBtn.dataset.op;
-      if (op === 'folder-rename' || op === 'folder-delete') {
-        const folderPath = opBtn.closest<HTMLElement>('.tree-folder')?.dataset.folderPath;
-        if (!folderPath) return;
-        if (op === 'folder-rename') await renameFolder(folderPath);
-        else await deleteFolder(folderPath);
-        return;
-      }
       const li = opBtn.closest<HTMLElement>('.tree-doc');
       if (!li) return;
       const id = Number(li.dataset.docId);
-      if (op === 'move') {
-        const entry = archiveEntries.find((d) => d.id === id);
-        if (entry) await moveArchive(entry);
-        return;
-      }
-      if (op === 'open-src') {
-        opts.onOpen(id);
-        return;
-      }
-      if (op === 'copy') {
-        const url = li.dataset.htmlUrl;
-        if (!url) {
-          opts.onStatus?.('没有可复制的链接', true);
-          return;
-        }
-        try {
-          await navigator.clipboard.writeText(url);
-          opts.onStatus?.('已复制链接');
-        } catch (err) {
-          opts.onStatus?.('复制失败：' + (err as Error).message, true);
-        }
-        return;
-      }
-      if (op === 'qdrant-sync') {
-        await syncQdrant(id);
-        return;
-      }
       const doc = allDocs.find((d) => d.id === id);
       if (!doc) return;
       if (op === 'rename') await renameDoc(doc);
@@ -563,14 +361,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     }
     const docLi = target.closest<HTMLElement>('.tree-doc');
     if (docLi && !target.closest('.tree-op')) {
-      const id = Number(docLi.dataset.docId);
-      if (scopeMode === 'archive') {
-        const url = docLi.dataset.htmlUrl;
-        if (url) window.open(url, '_blank', 'noopener');
-        else opts.onStatus?.('没有可打开的七牛链接', true);
-        return;
-      }
-      opts.onOpen(id);
+      opts.onOpen(Number(docLi.dataset.docId));
       void refresh();
     }
   }
@@ -609,77 +400,6 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       const res = await fetch(`/api/docs/${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       await removeHandle(doc.doc_key);
-      await refresh();
-    } catch (err) {
-      opts.onStatus?.('删除失败：' + (err as Error).message, true);
-    }
-  };
-
-  const moveArchive = async (entry: ArchiveEntry): Promise<void> => {
-    const next = await askText({
-      title: '移动归档',
-      label: '新的归档路径',
-      value: entry.archive_path,
-      confirmLabel: '移动',
-    });
-    if (!next || next.trim() === entry.archive_path) return;
-    try {
-      const res = await fetch(`/api/docs/${entry.id}/archive-path`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ archive_path: next.trim() }),
-      });
-      if (!res.ok) throw new Error(await readError(res));
-      await refresh();
-    } catch (err) {
-      opts.onStatus?.('移动失败：' + (err as Error).message, true);
-    }
-  };
-
-  const syncQdrant = async (id: number): Promise<void> => {
-    opts.onStatus?.('正在同步到知识库…');
-    try {
-      const res = await fetch(`/api/docs/${id}/qdrant-sync`, { method: 'POST' });
-      if (!res.ok) throw new Error(await readError(res));
-      const data = (await res.json()) as { chunks?: number };
-      opts.onStatus?.(`已同步到知识库（${data.chunks ?? 0} 段）`);
-      await refresh();
-    } catch (err) {
-      opts.onStatus?.('同步失败：' + (err as Error).message, true);
-    }
-  };
-
-  const renameFolder = async (from: string): Promise<void> => {
-    const to = await askText({
-      title: '重命名文件夹',
-      label: '新的文件夹路径',
-      value: from,
-      confirmLabel: '重命名',
-    });
-    if (!to || to.trim() === from) return;
-    try {
-      const res = await fetch('/api/archive/folders/rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from, to: to.trim() }),
-      });
-      if (!res.ok) throw new Error(await readError(res));
-      await refresh();
-    } catch (err) {
-      opts.onStatus?.('重命名失败：' + (err as Error).message, true);
-    }
-  };
-
-  const deleteFolder = async (path: string): Promise<void> => {
-    const ok = await askConfirm(`删除文件夹「${path}」？\n仅当其中没有归档文档时可以删除。`, {
-      title: '删除文件夹',
-      confirmLabel: '删除',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      const res = await fetch('/api/archive/folders?path=' + encodeURIComponent(path), { method: 'DELETE' });
-      if (!res.ok) throw new Error(await readError(res));
       await refresh();
     } catch (err) {
       opts.onStatus?.('删除失败：' + (err as Error).message, true);

@@ -2,8 +2,8 @@
 // 归档 = 服务端把当前工作副本生成一对不可变 md/html 并发布到一个固定链接 /a/<token>。
 // 前端不算 mermaid、不上传、不落库：一次 POST 拿结果；这里只管三态徽标、列表与历史折叠。
 
-import { askConfirm, askNote } from './dialog';
-import { showToast } from './toast';
+import { askConfirm, askNote } from './dialog.ts';
+import { showToast } from './toast.ts';
 
 export interface ArchiveStatus {
   stale: boolean;
@@ -33,6 +33,8 @@ export interface ArchiveDetail {
   history: Artifact[];
 }
 
+export type QdrantSyncStatus = 'none' | 'synced' | 'stale';
+
 export interface ArchiveItem {
   doc_id: number;
   doc_key: string;
@@ -43,6 +45,8 @@ export interface ArchiveItem {
   token: string;
   public_url: string;
   history_count: number;
+  /** 归档 Markdown 的知识库同步状态；服务端未提供时按未同步展示。 */
+  qdrant_sync?: QdrantSyncStatus;
 }
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -54,7 +58,7 @@ function esc(s: string): string {
 }
 
 /** public_url 是同源相对路径 /a/<token>，复制/打开都要补上 origin。 */
-function absolute(publicUrl: string): string {
+export function absolute(publicUrl: string): string {
   return /^https?:\/\//.test(publicUrl) ? publicUrl : location.origin + publicUrl;
 }
 
@@ -318,17 +322,38 @@ let listSeq = 0;
 let searchTimer: number | undefined;
 
 function statusCell(item: { stale: boolean; version: number }): string {
-  if (item.stale) return '<span class="ar-status is-stale">有更新未归档</span>';
+  if (item.stale)
+    return '<span class="ar-stale" title="草稿已改，尚未重新生成分享版">有更新未归档</span>';
   return '<span class="ar-status is-archived">已归档</span>';
 }
 
-function opsHtml(item: ArchiveItem): string {
+const QDRANT_LABEL: Record<QdrantSyncStatus, string> = {
+  none: '未同步',
+  stale: '待同步',
+  synced: '已同步',
+};
+
+const QDRANT_TITLE: Record<QdrantSyncStatus, string> = {
+  none: '尚未写入知识库',
+  stale: '归档已更新，知识库仍是旧版',
+  synced: '归档 Markdown 已写入知识库',
+};
+
+/** 知识库三态徽标（none / stale / synced）；字段缺失时按未同步处理。 */
+export function qdrantBadgeHtml(status?: QdrantSyncStatus): string {
+  const s: QdrantSyncStatus = status ?? 'none';
+  return `<span class="ar-qdrant ar-qdrant-${s}" title="${QDRANT_TITLE[s]}">${QDRANT_LABEL[s]}</span>`;
+}
+
+/** 归档列表行操作：预览已发布页、同步知识库（原侧栏归档入口迁入）。 */
+export function archiveOpsHtml(item: ArchiveItem): string {
+  const history = `历史${item.history_count ? ' (' + item.history_count + ')' : ''}`;
   return `<span class="ar-ops">
       <button data-op="open" type="button">打开</button>
+      <button data-op="preview" type="button">预览</button>
       <button data-op="copy" type="button">复制链接</button>
-      <button data-op="history" type="button" aria-expanded="false" data-label="历史${
-        item.history_count ? ' (' + item.history_count + ')' : ''
-      }">历史${item.history_count ? ' (' + item.history_count + ')' : ''}</button>
+      <button data-op="history" type="button" aria-expanded="false" data-label="${history}">${history}</button>
+      <button data-op="sync" type="button" class="ar-qdrant-btn" title="把归档 Markdown 同步到知识库">同步知识库</button>
       <button data-op="archive" type="button">重新归档</button>
       <button data-op="purge" type="button" class="is-danger">删除</button>
     </span>`;
@@ -355,13 +380,16 @@ export async function refreshArchiveList(q = ''): Promise<void> {
     }
     list.innerHTML = items
       .map(
-        (it) => `<li class="ar-row" data-id="${it.doc_id}" data-key="${esc(it.doc_key || '')}" data-token="${esc(it.token || '')}">
+        (it) => `<li class="ar-row" data-id="${it.doc_id}" data-key="${esc(it.doc_key || '')}" data-token="${esc(
+          it.token || '',
+        )}" data-url="${esc(it.public_url || (it.token ? '/a/' + it.token : ''))}">
           <div class="ar-line">
             <span class="ar-title" title="${esc(it.title || it.doc_key)}">${esc(it.title || '未命名文档')}</span>
             <span class="ar-ver">v${it.version}</span>
             ${statusCell(it)}
+            ${qdrantBadgeHtml(it.qdrant_sync)}
             <span class="ar-time">${fmtTime(it.created_at)}</span>
-            ${opsHtml(it)}
+            ${archiveOpsHtml(it)}
           </div>
           <ul class="ar-history" hidden></ul>
         </li>`,
@@ -494,6 +522,19 @@ async function purgeActive(docId: number, docKey: string): Promise<void> {
   }
 }
 
+/** 把当前归档 Markdown 写入知识库；成功后刷新徽标。 */
+async function syncArchive(docId: number): Promise<void> {
+  try {
+    const res = await fetch(`/api/docs/${docId}/qdrant-sync`, { method: 'POST' });
+    const data = await readJson<{ chunks?: number }>(res);
+    if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    showToast(`已同步到知识库（${data.chunks ?? 0} 段）`, 'success');
+    void refreshArchiveList(($('archive-search') as HTMLInputElement).value.trim());
+  } catch (e) {
+    showToast('同步失败：' + (e as Error).message, 'error');
+  }
+}
+
 export function initArchivePage(opts: PageOpts): void {
   pageOpts = opts;
   const list = $('archive-list');
@@ -530,7 +571,12 @@ export function initArchivePage(opts: PageOpts): void {
     const docId = Number(row.dataset.id);
     const docKey = row.dataset.key || '';
     if (op === 'open') pageOpts.openDoc(docId);
-    else if (op === 'copy') void copyText(absolute(row.dataset.token ? '/a/' + row.dataset.token : ''));
+    else if (op === 'preview') {
+      const url = row.dataset.url || (row.dataset.token ? '/a/' + row.dataset.token : '');
+      if (url) window.open(absolute(url), '_blank', 'noopener');
+      else showToast('没有可预览的归档链接', 'error');
+    } else if (op === 'copy') void copyText(absolute(row.dataset.token ? '/a/' + row.dataset.token : ''));
+    else if (op === 'sync') void syncArchive(docId);
     else if (op === 'archive') void reArchive(String(docId));
     else if (op === 'purge') void purgeActive(docId, docKey);
     else if (op === 'history') {
