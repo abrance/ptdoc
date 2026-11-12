@@ -574,6 +574,7 @@ export function initDB(dbFile?: string): void {
   migrateArchiveArtifacts(file);
   migrateSnapshotVersions(file);
   migrateApiTokenHash();
+  migrateSpaceSchema();
 }
 
 export function closeDB(): void {
@@ -694,6 +695,21 @@ export function claimOrphanRecords(userId: number): void {
     d.prepare('UPDATE shares SET user_id=? WHERE user_id=0').run(userId);
     d.prepare('UPDATE media SET user_id=? WHERE user_id=0').run(userId);
     d.prepare('UPDATE mermaid_cache SET user_id=? WHERE user_id=0').run(userId);
+    // 空间树跟着走：旧单用户库里 user 0 的 default 空间与目录并入首个用户的 default 空间，
+    // 否则这些文档会挂在一个 user_id=0 的空间上，树接口按 user_id 过滤后看不到。
+    const orphanSpaces = d.prepare('SELECT id FROM spaces WHERE user_id=0').all() as Array<{ id: number }>;
+    if (orphanSpaces.length > 0) {
+      const target = ensureDefaultSpace(userId);
+      const ids = orphanSpaces.map((s) => s.id);
+      const marks = ids.map(() => '?').join(',');
+      d.prepare(`UPDATE docs SET space_id=? WHERE user_id=? AND space_id IN (${marks})`).run(
+        target.id,
+        userId,
+        ...ids,
+      );
+      d.prepare('UPDATE space_folders SET space_id=?, user_id=? WHERE user_id=0').run(target.id, userId);
+      d.prepare('DELETE FROM spaces WHERE user_id=0').run();
+    }
     d.exec('COMMIT');
   } catch (e) {
     d.exec('ROLLBACK');
@@ -811,6 +827,9 @@ interface DocRow {
   created_at: number;
   updated_at: number;
   archive_token?: string | null;
+  space_id: number | null;
+  folder_id: number | null;
+  sort_order: number;
 }
 
 export interface DocSummary {
@@ -820,6 +839,9 @@ export interface DocSummary {
   filename: string;
   updated_at: number;
   last_opened_at: number;
+  space_id: number | null;
+  folder_id: number | null;
+  sort_order: number;
 }
 
 /** 按 doc_key 新增或更新一篇文档（全文 + 元信息）。 */
@@ -829,6 +851,7 @@ export function upsertDoc(
   title: string,
   filename: string,
   content: string,
+  placement?: { spaceId?: number; folderId?: number | null },
 ): { id: number; doc_key: string } {
   const now = Date.now();
   const existing = getDb()
@@ -843,11 +866,17 @@ export function upsertDoc(
     autoSnapshotIfChanged(userId, existing.id, content);
     return { id: existing.id, doc_key: docKey };
   }
+  // 新文档落在指定空间/目录；未指定则进该用户的默认空间根。已存在文档的归属只由 move 接口改，
+  // 保存正文时忽略 placement，避免「保存」意外挪动文档。
+  const spaceId = placement?.spaceId ?? ensureDefaultSpace(userId).id;
+  const folderId = placement?.folderId ?? null;
+  assertDocContainer(userId, spaceId, folderId);
+  const sortOrder = nextDocSortOrder(userId, spaceId, folderId);
   const info = getDb()
     .prepare(
-      'INSERT INTO docs (user_id, doc_key, title, filename, content, created_at, updated_at, last_opened_at) VALUES (?,?,?,?,?,?,?,?)',
+      'INSERT INTO docs (user_id, doc_key, title, filename, content, created_at, updated_at, last_opened_at, space_id, folder_id, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
     )
-    .run(userId, docKey, title, filename, content, now, now, now);
+    .run(userId, docKey, title, filename, content, now, now, now, spaceId, folderId, sortOrder);
   const createdId = Number(info.lastInsertRowid);
   autoSnapshotIfChanged(userId, createdId, content);
   return { id: createdId, doc_key: docKey };
@@ -869,7 +898,7 @@ export function searchDocs(userId: number, q: string, limit = 50): DocSummary[] 
   const like = `%${q}%`;
   return getDb()
     .prepare(
-      `SELECT id, doc_key, title, filename, updated_at, last_opened_at FROM docs
+      `SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs
        WHERE user_id=? AND (title LIKE ? OR filename LIKE ? OR content LIKE ?)
        ORDER BY last_opened_at DESC, updated_at DESC LIMIT ?`,
     )
@@ -879,7 +908,7 @@ export function searchDocs(userId: number, q: string, limit = 50): DocSummary[] 
 export function listRecent(userId: number, limit = 50): DocSummary[] {
   return getDb()
     .prepare(
-      'SELECT id, doc_key, title, filename, updated_at, last_opened_at FROM docs WHERE user_id=? ORDER BY last_opened_at DESC, updated_at DESC LIMIT ?',
+      'SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs WHERE user_id=? ORDER BY last_opened_at DESC, updated_at DESC LIMIT ?',
     )
     .all(userId, limit) as unknown as DocSummary[];
 }
@@ -888,7 +917,7 @@ export function listRecent(userId: number, limit = 50): DocSummary[] {
 export function listAllDocs(userId: number): DocSummary[] {
   return getDb()
     .prepare(
-      'SELECT id, doc_key, title, filename, updated_at, last_opened_at FROM docs WHERE user_id=? ORDER BY doc_key ASC',
+      'SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs WHERE user_id=? ORDER BY doc_key ASC',
     )
     .all(userId) as unknown as DocSummary[];
 }
@@ -2443,4 +2472,553 @@ export function deleteArchiveFolder(userId: number, rawPath: unknown): { ok: boo
   if (!row) throw new HttpError(404, '文件夹不存在');
   getDb().prepare('DELETE FROM archive_folders WHERE id=? AND user_id=?').run(row.id, userId);
   return { ok: true };
+}
+
+// ─── 空间 / 目录 / 排序（space tree）────────────────────────
+// 归属链：spaces.user_id 与 docs.user_id 必须一致；space_folders 冗余 user_id 只为让
+// 所有查询都能带 user_id 条件（docs 表在多用户迁移后才一定有 user_id）。
+// 服务端只能在 SQL 里做这一层校验（SQLite 不支持带 user_id 的复合外键），
+// 因此每个入口都先按 (id, user_id) 取行，再做父子关系/空间归属校验。
+
+export interface SpaceRow {
+  id: number;
+  user_id: number;
+  name: string;
+  is_default: number;
+  sort_order: number;
+  created_at: number;
+}
+
+export interface SpaceFolderRow {
+  id: number;
+  user_id: number;
+  space_id: number;
+  parent_id: number | null;
+  name: string;
+  sort_order: number;
+  created_at: number;
+}
+
+export const DEFAULT_SPACE_NAME = 'default';
+
+function normalizeSpaceName(raw: unknown, kind: '空间' | '目录'): string {
+  if (typeof raw !== 'string') throw new HttpError(400, `${kind}名称须为字符串`);
+  const name = raw.trim();
+  if (!name || name.length > 64) throw new HttpError(400, `${kind}名称去掉首尾空白后须为 1～64 个字符`);
+  if (/[\x00-\x1f/]/.test(name)) throw new HttpError(400, `${kind}名称禁止控制字符与 /`);
+  return name;
+}
+
+function asId(raw: unknown, kind: string): number {
+  const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0) throw new HttpError(400, `${kind} 必须是正整数 id`);
+  return n;
+}
+
+function nextSpaceSortOrder(userId: number): number {
+  const row = getDb().prepare('SELECT MAX(sort_order) AS m FROM spaces WHERE user_id=?').get(userId) as {
+    m: number | null;
+  };
+  return row.m == null ? 0 : Number(row.m) + 1;
+}
+
+/** 取（必要时创建）该用户的默认空间。默认空间用 is_default 标记，不靠名字。 */
+export function ensureDefaultSpace(userId: number): SpaceRow {
+  const d = getDb();
+  const row = d.prepare('SELECT * FROM spaces WHERE user_id=? AND is_default=1').get(userId) as unknown as
+    | SpaceRow
+    | undefined;
+  if (row) return row;
+  const now = Date.now();
+  const sortOrder = nextSpaceSortOrder(userId);
+  const info = d
+    .prepare('INSERT INTO spaces (user_id, name, is_default, sort_order, created_at) VALUES (?,?,1,?,?)')
+    .run(userId, DEFAULT_SPACE_NAME, sortOrder, now);
+  return {
+    id: Number(info.lastInsertRowid),
+    user_id: userId,
+    name: DEFAULT_SPACE_NAME,
+    is_default: 1,
+    sort_order: sortOrder,
+    created_at: now,
+  };
+}
+
+export function requireSpace(userId: number, rawId: unknown): SpaceRow {
+  const id = asId(rawId, 'space_id');
+  const row = getDb().prepare('SELECT * FROM spaces WHERE id=? AND user_id=?').get(id, userId) as unknown as
+    | SpaceRow
+    | undefined;
+  if (!row) throw new HttpError(404, '空间不存在');
+  return row;
+}
+
+export function requireSpaceFolder(userId: number, rawId: unknown): SpaceFolderRow {
+  const id = asId(rawId, 'folder_id');
+  const row = getDb()
+    .prepare('SELECT * FROM space_folders WHERE id=? AND user_id=?')
+    .get(id, userId) as unknown as SpaceFolderRow | undefined;
+  if (!row) throw new HttpError(404, '目录不存在');
+  return row;
+}
+
+export function listSpaces(userId: number): SpaceRow[] {
+  ensureDefaultSpace(userId);
+  return getDb()
+    .prepare('SELECT * FROM spaces WHERE user_id=? ORDER BY sort_order ASC, id ASC')
+    .all(userId) as unknown as SpaceRow[];
+}
+
+export function createSpace(userId: number, rawName: unknown): SpaceRow {
+  const name = normalizeSpaceName(rawName, '空间');
+  if (name.toLowerCase() === DEFAULT_SPACE_NAME) throw new HttpError(409, '默认空间已存在，不能重名');
+  const dup = getDb()
+    .prepare('SELECT id FROM spaces WHERE user_id=? AND name=? COLLATE NOCASE')
+    .get(userId, name) as { id: number } | undefined;
+  if (dup) throw new HttpError(409, '空间名称已被使用');
+  ensureDefaultSpace(userId);
+  const now = Date.now();
+  const sortOrder = nextSpaceSortOrder(userId);
+  const info = getDb()
+    .prepare('INSERT INTO spaces (user_id, name, is_default, sort_order, created_at) VALUES (?,?,0,?,?)')
+    .run(userId, name, sortOrder, now);
+  return { id: Number(info.lastInsertRowid), user_id: userId, name, is_default: 0, sort_order: sortOrder, created_at: now };
+}
+
+export function renameSpace(userId: number, rawId: unknown, rawName: unknown): { ok: true } {
+  const space = requireSpace(userId, rawId);
+  const name = normalizeSpaceName(rawName, '空间');
+  if (space.is_default === 1 && name.toLowerCase() !== DEFAULT_SPACE_NAME)
+    throw new HttpError(400, '默认空间不能改名');
+  const dup = getDb()
+    .prepare('SELECT id FROM spaces WHERE user_id=? AND name=? COLLATE NOCASE AND id<>?')
+    .get(userId, name, space.id) as { id: number } | undefined;
+  if (dup) throw new HttpError(409, '空间名称已被使用');
+  getDb().prepare('UPDATE spaces SET name=? WHERE id=? AND user_id=?').run(name, space.id, userId);
+  return { ok: true };
+}
+
+/**
+ * 删空间：非空空间必须显式给 move_to（目标空间 id），其文档整体移到目标空间根、目录连同层级删除。
+ * 默认空间不可删。这样「删空间」永远不会静默带走文档。
+ */
+export function deleteSpace(
+  userId: number,
+  rawId: unknown,
+  moveToRawId?: unknown,
+): { ok: true; moved_docs: number } {
+  const space = requireSpace(userId, rawId);
+  if (space.is_default === 1) throw new HttpError(400, '默认空间不能删除');
+  const d = getDb();
+  const docs = d.prepare('SELECT id FROM docs WHERE user_id=? AND space_id=? ORDER BY folder_id, sort_order, id').all(
+    userId,
+    space.id,
+  ) as Array<{ id: number }>;
+  const folders = d.prepare('SELECT id FROM space_folders WHERE user_id=? AND space_id=?').all(userId, space.id) as Array<{
+    id: number;
+  }>;
+  const moveTo = moveToRawId == null || moveToRawId === '' ? undefined : requireSpace(userId, moveToRawId);
+  if ((docs.length > 0 || folders.length > 0) && !moveTo) {
+    throw new HttpError(
+      409,
+      `空间内还有 ${docs.length} 篇文档、${folders.length} 个目录；请先移走，或带 move_to=<目标空间 id> 一并迁移文档`,
+    );
+  }
+  d.exec('BEGIN');
+  try {
+    if (moveTo) {
+      if (moveTo.id === space.id) throw new HttpError(400, 'move_to 不能指向要删除的空间');
+      const targetRoot = docSiblingIds(userId, moveTo.id, null);
+      const ordered = [...targetRoot, ...docs.map((r) => r.id)];
+      d.prepare('UPDATE docs SET space_id=?, folder_id=NULL WHERE user_id=? AND space_id=?').run(
+        moveTo.id,
+        userId,
+        space.id,
+      );
+      renumberDocSiblings(userId, moveTo.id, null, ordered);
+    }
+    d.prepare('DELETE FROM space_folders WHERE user_id=? AND space_id=?').run(userId, space.id);
+    d.prepare('DELETE FROM spaces WHERE id=? AND user_id=?').run(space.id, userId);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return { ok: true, moved_docs: docs.length };
+}
+
+/** 侧栏空间顺序：body.order 必须恰好是该用户全部空间 id 的一个排列。 */
+export function reorderSpaces(userId: number, order: unknown): { ok: true } {
+  const spaces = listSpaces(userId);
+  if (!Array.isArray(order)) throw new HttpError(400, 'order 必须是空间 id 数组');
+  const ids = order.map((v) => asId(v, 'space id'));
+  const have = new Set(spaces.map((s) => s.id));
+  if (ids.length !== spaces.length || new Set(ids).size !== ids.length || ids.some((id) => !have.has(id)))
+    throw new HttpError(400, 'order 必须包含且只包含当前用户的全部空间');
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    const upd = d.prepare('UPDATE spaces SET sort_order=? WHERE id=? AND user_id=?');
+    ids.forEach((id, i) => upd.run(i, id, userId));
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return { ok: true };
+}
+
+// ─── 目录 ──────────────────────────────────────────────
+
+function folderSiblingIds(userId: number, spaceId: number, parentId: number | null, excludeId = -1): number[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT id FROM space_folders
+         WHERE user_id=? AND space_id=? AND parent_id IS ? AND id<>?
+         ORDER BY sort_order ASC, id ASC`,
+      )
+      .all(userId, spaceId, parentId, excludeId) as Array<{ id: number }>
+  ).map((r) => r.id);
+}
+
+function docSiblingIds(userId: number, spaceId: number, folderId: number | null, excludeId = -1): number[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT id FROM docs
+         WHERE user_id=? AND space_id=? AND folder_id IS ? AND id<>?
+         ORDER BY sort_order ASC, id ASC`,
+      )
+      .all(userId, spaceId, folderId, excludeId) as Array<{ id: number }>
+  ).map((r) => r.id);
+}
+
+function renumberFolderSiblings(userId: number, spaceId: number, parentId: number | null, ordered: number[]): void {
+  const upd = getDb().prepare('UPDATE space_folders SET sort_order=? WHERE id=? AND user_id=? AND space_id=?');
+  ordered.forEach((id, i) => upd.run(i, id, userId, spaceId));
+}
+
+function renumberDocSiblings(userId: number, spaceId: number, folderId: number | null, ordered: number[]): void {
+  const upd = getDb().prepare('UPDATE docs SET sort_order=? WHERE id=? AND user_id=? AND space_id=?');
+  ordered.forEach((id, i) => upd.run(i, id, userId, spaceId));
+}
+
+function nextDocSortOrder(userId: number, spaceId: number, folderId: number | null): number {
+  const row = getDb()
+    .prepare('SELECT MAX(sort_order) AS m FROM docs WHERE user_id=? AND space_id=? AND folder_id IS ?')
+    .get(userId, spaceId, folderId) as { m: number | null };
+  return row.m == null ? 0 : Number(row.m) + 1;
+}
+
+/** 文档归属校验：空间属于该用户；目录属于该用户且在同一空间。 */
+function assertDocContainer(userId: number, spaceId: number, folderId: number | null): void {
+  requireSpace(userId, spaceId);
+  if (folderId == null) return;
+  const folder = requireSpaceFolder(userId, folderId);
+  if (folder.space_id !== spaceId) throw new HttpError(400, '目录不属于该空间');
+}
+
+function assertFolderNameFree(
+  userId: number,
+  spaceId: number,
+  parentId: number | null,
+  name: string,
+  excludeId = -1,
+): void {
+  const dup = getDb()
+    .prepare(
+      `SELECT id FROM space_folders
+       WHERE user_id=? AND space_id=? AND parent_id IS ? AND name=? COLLATE NOCASE AND id<>?`,
+    )
+    .get(userId, spaceId, parentId, name, excludeId) as { id: number } | undefined;
+  if (dup) throw new HttpError(409, '同级目录下已有同名目录');
+}
+
+function assertNoFolderCycle(userId: number, folderId: number, parentId: number | null): void {
+  let cur = parentId;
+  for (let guard = 0; cur != null && guard < 1000; guard++) {
+    if (cur === folderId) throw new HttpError(400, '目录不能移动到自身或自己的子目录下');
+    const row = getDb()
+      .prepare('SELECT parent_id FROM space_folders WHERE id=? AND user_id=?')
+      .get(cur, userId) as { parent_id: number | null } | undefined;
+    cur = row ? row.parent_id : null;
+  }
+}
+
+export function createSpaceFolder(
+  userId: number,
+  rawSpaceId: unknown,
+  rawName: unknown,
+  rawParentId?: unknown,
+): SpaceFolderRow {
+  const space = requireSpace(userId, rawSpaceId);
+  const name = normalizeSpaceName(rawName, '目录');
+  const parentId = rawParentId == null || rawParentId === '' ? null : requireSpaceFolder(userId, rawParentId).id;
+  if (parentId != null) {
+    const parent = requireSpaceFolder(userId, parentId);
+    if (parent.space_id !== space.id) throw new HttpError(400, '父目录不属于该空间');
+  }
+  assertFolderNameFree(userId, space.id, parentId, name);
+  const now = Date.now();
+  const siblings = folderSiblingIds(userId, space.id, parentId);
+  const info = getDb()
+    .prepare(
+      'INSERT INTO space_folders (user_id, space_id, parent_id, name, sort_order, created_at) VALUES (?,?,?,?,?,?)',
+    )
+    .run(userId, space.id, parentId, name, siblings.length, now);
+  return {
+    id: Number(info.lastInsertRowid),
+    user_id: userId,
+    space_id: space.id,
+    parent_id: parentId,
+    name,
+    sort_order: siblings.length,
+    created_at: now,
+  };
+}
+
+export function renameSpaceFolder(userId: number, rawId: unknown, rawName: unknown): { ok: true } {
+  const folder = requireSpaceFolder(userId, rawId);
+  const name = normalizeSpaceName(rawName, '目录');
+  assertFolderNameFree(userId, folder.space_id, folder.parent_id, name, folder.id);
+  getDb().prepare('UPDATE space_folders SET name=? WHERE id=? AND user_id=?').run(name, folder.id, userId);
+  return { ok: true };
+}
+
+/** 删目录：只允许删空目录（无子目录、无文档），避免静默丢内容。 */
+export function deleteSpaceFolder(userId: number, rawId: unknown): { ok: true } {
+  const folder = requireSpaceFolder(userId, rawId);
+  const d = getDb();
+  const childFolders = d
+    .prepare('SELECT COUNT(*) AS n FROM space_folders WHERE user_id=? AND parent_id=?')
+    .get(userId, folder.id) as { n: number };
+  const childDocs = d
+    .prepare('SELECT COUNT(*) AS n FROM docs WHERE user_id=? AND folder_id=?')
+    .get(userId, folder.id) as { n: number };
+  if (Number(childFolders.n) > 0 || Number(childDocs.n) > 0) {
+    throw new HttpError(
+      409,
+      `目录内还有 ${Number(childDocs.n)} 篇文档、${Number(childFolders.n)} 个子目录；请先移空再删除`,
+    );
+  }
+  d.prepare('DELETE FROM space_folders WHERE id=? AND user_id=?').run(folder.id, userId);
+  return { ok: true };
+}
+
+type OrderBody = { before_id?: unknown; after_id?: unknown; position?: unknown };
+
+/** 依 before_id / after_id / position 在兄弟列表里求插入下标（默认追加到末尾）。 */
+function insertIndex(siblings: number[], body: OrderBody, what: string): number {
+  const before = body.before_id == null ? null : asId(body.before_id, 'before_id');
+  const after = body.after_id == null ? null : asId(body.after_id, 'after_id');
+  if (before !== null && after !== null) throw new HttpError(400, 'before_id 与 after_id 只能给一个');
+  if (before !== null) {
+    const i = siblings.indexOf(before);
+    if (i < 0) throw new HttpError(400, `before_id 不在目标位置（${what}）`);
+    return i;
+  }
+  if (after !== null) {
+    const i = siblings.indexOf(after);
+    if (i < 0) throw new HttpError(400, `after_id 不在目标位置（${what}）`);
+    return i + 1;
+  }
+  const pos = body.position;
+  if (pos === undefined || pos === null || pos === 'end') return siblings.length;
+  if (pos === 'start') return 0;
+  if (typeof pos === 'number' && Number.isInteger(pos) && pos >= 0) return Math.min(pos, siblings.length);
+  throw new HttpError(400, 'position 只接受 start / end 或非负整数下标');
+}
+
+/** 移动（或跨空间/跨目录移动）目录，并落定顺序。 */
+export function moveSpaceFolder(
+  userId: number,
+  rawId: unknown,
+  body: { space_id?: unknown; parent_id?: unknown } & OrderBody,
+): { ok: true; space_id: number; parent_id: number | null } {
+  const folder = requireSpaceFolder(userId, rawId);
+  const targetSpace = body.space_id === undefined ? requireSpace(userId, folder.space_id) : requireSpace(userId, body.space_id);
+  let targetParentId: number | null;
+  if (body.parent_id !== undefined) {
+    targetParentId = body.parent_id == null || body.parent_id === '' ? null : requireSpaceFolder(userId, body.parent_id).id;
+  } else {
+    targetParentId = targetSpace.id === folder.space_id ? folder.parent_id : null;
+  }
+  if (targetParentId != null) {
+    const parent = requireSpaceFolder(userId, targetParentId);
+    if (parent.space_id !== targetSpace.id) throw new HttpError(400, '父目录不属于该空间');
+    assertNoFolderCycle(userId, folder.id, targetParentId);
+  }
+  assertFolderNameFree(userId, targetSpace.id, targetParentId, folder.name, folder.id);
+  const siblings = folderSiblingIds(userId, targetSpace.id, targetParentId, folder.id);
+  const idx = insertIndex(siblings, body, '目标空间/父目录');
+  const ordered = [...siblings.slice(0, idx), folder.id, ...siblings.slice(idx)];
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    d.prepare('UPDATE space_folders SET space_id=?, parent_id=? WHERE id=? AND user_id=?').run(
+      targetSpace.id,
+      targetParentId,
+      folder.id,
+      userId,
+    );
+    renumberFolderSiblings(userId, targetSpace.id, targetParentId, ordered);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return { ok: true, space_id: targetSpace.id, parent_id: targetParentId };
+}
+
+// ─── 文档移动 / 排序 ────────────────────────────────────
+
+export interface DocPlacementBody {
+  space_id?: unknown;
+  folder_id?: unknown;
+  before_id?: unknown;
+  after_id?: unknown;
+  position?: unknown;
+}
+
+/** 移动文档：可换空间、换目录（folder_id=null 为空间根），可带 before/after/position 落位。 */
+export function moveDoc(
+  userId: number,
+  docId: number,
+  body: DocPlacementBody,
+): { ok: true; space_id: number; folder_id: number | null; sort_order: number } {
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '文档不存在');
+  const curSpaceId = doc.space_id ?? ensureDefaultSpace(userId).id;
+  const targetSpace = body.space_id === undefined ? requireSpace(userId, curSpaceId) : requireSpace(userId, body.space_id);
+  let targetFolderId: number | null;
+  if (Object.prototype.hasOwnProperty.call(body, 'folder_id')) {
+    targetFolderId = body.folder_id == null || body.folder_id === '' ? null : requireSpaceFolder(userId, body.folder_id).id;
+  } else {
+    targetFolderId = targetSpace.id === curSpaceId ? doc.folder_id : null;
+  }
+  assertDocContainer(userId, targetSpace.id, targetFolderId);
+  const siblings = docSiblingIds(userId, targetSpace.id, targetFolderId, doc.id);
+  const idx = insertIndex(siblings, body, '目标空间/目录');
+  const ordered = [...siblings.slice(0, idx), doc.id, ...siblings.slice(idx)];
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    d.prepare('UPDATE docs SET space_id=?, folder_id=? WHERE id=? AND user_id=?').run(
+      targetSpace.id,
+      targetFolderId,
+      doc.id,
+      userId,
+    );
+    renumberDocSiblings(userId, targetSpace.id, targetFolderId, ordered);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return { ok: true, space_id: targetSpace.id, folder_id: targetFolderId, sort_order: idx };
+}
+
+/** 同容器内重排：给了不同的 space_id / folder_id 就拒绝（那是 move）。 */
+export function reorderDoc(userId: number, docId: number, body: DocPlacementBody): { ok: true } {
+  const doc = getDoc(userId, docId);
+  if (!doc) throw new HttpError(404, '文档不存在');
+  if (body.space_id !== undefined && asId(body.space_id, 'space_id') !== doc.space_id)
+    throw new HttpError(400, 'reorder 不能改空间归属，请改用 move');
+  if (body.folder_id !== undefined) {
+    const fid = body.folder_id == null || body.folder_id === '' ? null : asId(body.folder_id, 'folder_id');
+    if (fid !== doc.folder_id) throw new HttpError(400, 'reorder 不能改目录归属，请改用 move');
+  }
+  moveDoc(userId, docId, { before_id: body.before_id, after_id: body.after_id, position: body.position });
+  return { ok: true };
+}
+
+/** 单个空间的完整树：folders 按 (parent_id, sort_order)，docs 按 (folder_id, sort_order)。 */
+export function listSpaceTree(
+  userId: number,
+  rawSpaceId: unknown,
+): { space: SpaceRow; folders: SpaceFolderRow[]; docs: DocSummary[] } {
+  const space = requireSpace(userId, rawSpaceId);
+  const folders = getDb()
+    .prepare(
+      `SELECT * FROM space_folders WHERE user_id=? AND space_id=?
+       ORDER BY parent_id IS NOT NULL ASC, parent_id ASC, sort_order ASC, id ASC`,
+    )
+    .all(userId, space.id) as unknown as SpaceFolderRow[];
+  const docs = getDb()
+    .prepare(
+      `SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order
+       FROM docs WHERE user_id=? AND space_id=?
+       ORDER BY folder_id IS NOT NULL ASC, folder_id ASC, sort_order ASC, id ASC`,
+    )
+    .all(userId, space.id) as unknown as DocSummary[];
+  return { space, folders, docs };
+}
+
+/** 建库/升级时建表并回填：存量文档全部进各自用户的默认空间根，顺序按最近打开/更新时间。幂等。 */
+function migrateSpaceSchema(): void {
+  const d = getDb();
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS spaces (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL,
+      name       TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_user_name ON spaces(user_id, name);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_default ON spaces(user_id) WHERE is_default=1;
+    CREATE TABLE IF NOT EXISTS space_folders (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL,
+      space_id   INTEGER NOT NULL,
+      parent_id  INTEGER,
+      name       TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_space_folders_user ON space_folders(user_id, space_id, parent_id, sort_order);
+  `);
+  for (const [col, def] of [
+    ['space_id', 'INTEGER'],
+    ['folder_id', 'INTEGER'],
+    ['sort_order', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) {
+    if (!tableHasColumn('docs', col)) {
+      try {
+        d.exec(`ALTER TABLE docs ADD COLUMN ${col} ${def}`);
+      } catch {
+        /* 并发/已存在则忽略 */
+      }
+    }
+  }
+  d.exec('CREATE INDEX IF NOT EXISTS idx_docs_space ON docs(user_id, space_id, folder_id, sort_order)');
+
+  // 有用户但没文档时也先备好默认空间，侧栏首屏就有「default」。
+  const users = d.prepare('SELECT id FROM users').all() as Array<{ id: number }>;
+  for (const u of users) ensureDefaultSpace(u.id);
+
+  // 存量文档回填：只处理 space_id 仍为空的（跑第二遍即为 no-op）。
+  const orphans = d
+    .prepare('SELECT DISTINCT user_id FROM docs WHERE space_id IS NULL ORDER BY user_id')
+    .all() as Array<{ user_id: number }>;
+  if (orphans.length === 0) return;
+  const pick = d.prepare(
+    `SELECT id FROM docs WHERE user_id=? AND space_id IS NULL
+     ORDER BY last_opened_at DESC, updated_at DESC, id DESC`,
+  );
+  const upd = d.prepare('UPDATE docs SET space_id=?, folder_id=NULL, sort_order=? WHERE id=? AND space_id IS NULL');
+  d.exec('BEGIN');
+  try {
+    for (const o of orphans) {
+      const space = ensureDefaultSpace(o.user_id);
+      const rows = pick.all(o.user_id) as Array<{ id: number }>;
+      rows.forEach((r, i) => upd.run(space.id, i, r.id));
+    }
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
 }

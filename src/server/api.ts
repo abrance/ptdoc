@@ -40,6 +40,18 @@ import {
   createArchiveFolder,
   renameArchiveFolder,
   deleteArchiveFolder,
+  listSpaces,
+  createSpace,
+  renameSpace,
+  deleteSpace,
+  reorderSpaces,
+  listSpaceTree,
+  createSpaceFolder,
+  renameSpaceFolder,
+  deleteSpaceFolder,
+  moveSpaceFolder,
+  moveDoc,
+  reorderDoc,
 } from './db.ts';
 import { parseStorageInput, saveVerifiedProfile, selfCheckPrivateBucket, toPublicProfile, verifyConnectivity } from './storage.ts';
 import { syncArchiveToQdrant } from './archive-qdrant.ts';
@@ -64,6 +76,8 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       !url.startsWith('/api/storage') &&
       !url.startsWith('/api/settings') &&
       !url.startsWith('/api/archive') &&
+      !url.startsWith('/api/spaces') &&
+      !url.startsWith('/api/folders') &&
       !url.startsWith('/s/')
     )
       return next();
@@ -145,6 +159,60 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, await syncArchiveToQdrant(uid, Number(qdrantSyncMatch[1])));
       }
 
+      // ─── 空间 / 目录 / 拖拽排序 ───
+      if (url === '/api/spaces' && req.method === 'GET') {
+        return sendJson(res, 200, { spaces: listSpaces(uid) });
+      }
+      if (url === '/api/spaces' && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, createSpace(uid, b.name));
+      }
+      if (url === '/api/spaces/reorder' && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, reorderSpaces(uid, b.order));
+      }
+      const spaceTreeMatch = url.match(/^\/api\/spaces\/(\d+)\/tree(?:\?.*)?$/);
+      if (spaceTreeMatch && req.method === 'GET') {
+        return sendJson(res, 200, listSpaceTree(uid, Number(spaceTreeMatch[1])));
+      }
+      const spaceFolderMatch = url.match(/^\/api\/spaces\/(\d+)\/folders$/);
+      if (spaceFolderMatch && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, createSpaceFolder(uid, Number(spaceFolderMatch[1]), b.name, b.parent_id));
+      }
+      const spaceMatch = url.match(/^\/api\/spaces\/(\d+)(?:\?.*)?$/);
+      if (spaceMatch && req.method === 'PATCH') {
+        const b = await readJson(req);
+        return sendJson(res, 200, renameSpace(uid, Number(spaceMatch[1]), b.name));
+      }
+      if (spaceMatch && req.method === 'DELETE') {
+        const moveTo = new URL(url, 'http://localhost').searchParams.get('move_to');
+        return sendJson(res, 200, deleteSpace(uid, Number(spaceMatch[1]), moveTo ?? undefined));
+      }
+      const folderMoveMatch = url.match(/^\/api\/folders\/(\d+)\/move$/);
+      if (folderMoveMatch && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, moveSpaceFolder(uid, Number(folderMoveMatch[1]), b ?? {}));
+      }
+      const folderMatch = url.match(/^\/api\/folders\/(\d+)$/);
+      if (folderMatch && req.method === 'PATCH') {
+        const b = await readJson(req);
+        return sendJson(res, 200, renameSpaceFolder(uid, Number(folderMatch[1]), b.name));
+      }
+      if (folderMatch && req.method === 'DELETE') {
+        return sendJson(res, 200, deleteSpaceFolder(uid, Number(folderMatch[1])));
+      }
+      const docMoveMatch = url.match(/^\/api\/docs\/(\d+)\/move$/);
+      if (docMoveMatch && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, moveDoc(uid, Number(docMoveMatch[1]), b ?? {}));
+      }
+      const docReorderMatch = url.match(/^\/api\/docs\/(\d+)\/reorder$/);
+      if (docReorderMatch && req.method === 'POST') {
+        const b = await readJson(req);
+        return sendJson(res, 200, reorderDoc(uid, Number(docReorderMatch[1]), b ?? {}));
+      }
+
       const snapMatch = url.match(/^\/api\/docs\/(\d+)\/snapshots$/);
       if (snapMatch && req.method === 'POST') {
         const b = await readJson(req);
@@ -224,7 +292,10 @@ export function apiMiddleware(): Connect.NextHandleFunction {
 
       if (url === '/api/docs' && req.method === 'POST') {
         const b = await readJson(req);
-        const r = upsertDoc(uid, b.doc_key, b.title ?? '', b.filename ?? '', b.content ?? '');
+        const r = upsertDoc(uid, b.doc_key, b.title ?? '', b.filename ?? '', b.content ?? '', {
+          spaceId: b.space_id ?? undefined,
+          folderId: b.folder_id ?? undefined,
+        });
         return sendJson(res, 200, r);
       }
       if (url === '/api/docs/full' && req.method === 'GET') {
