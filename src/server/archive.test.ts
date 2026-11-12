@@ -18,7 +18,9 @@ import {
   imageWarningFor,
   prepareArchiveMarkdown,
   setArchiveStorageForTests,
+  absolutizeImages,
 } from './archive.ts';
+import type { QiniuConfig } from './qiniu-uploader.ts';
 
 function freshProject(): { dir: string; docId: number } {
   const dir = mkdtempSync(join(tmpdir(), 'ptdoc-arch-'));
@@ -132,4 +134,44 @@ test('FR-26 图片告警区分签名失效(401)与资源不存在(404)', () => {
   assert.match(imageWarningFor(502, u), /图片不可访问（HTTP 502）/, '其他状态码保留原状态，不硬塞进 401/404');
   assert.equal(imageWarningFor(0, u), `图片不可访问：${u}`, '连不上（DNS/超时）保持原文案');
   for (const st of [0, 401, 403, 404, 500]) assert.ok(imageWarningFor(st, u).includes(u), '文案必须带 URL');
+});
+
+test('FR-26 私有桶：过期签名的图在 HEAD 前先重签，不产出假警报', async () => {
+  const realFetch = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (input: any) => {
+    seen.push(String(input));
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  const cfg: QiniuConfig = {
+    accessKey: 'ak',
+    secretKey: 'sk',
+    bucket: 'priv',
+    domain: 'https://cdn.example.com',
+    zone: 'Zone_z2',
+    privateBucket: true,
+    urlTtl: 300,
+  };
+  const stale = '![](https://cdn.example.com/img/a.png?e=1000000000&token=ak:stale)';
+  try {
+    const out = await absolutizeImages(stale, undefined, cfg);
+    assert.deepEqual(out.warnings, [], '重签后可访问，不应报「签名失效」');
+    assert.equal(seen.length, 1);
+    const e = Number(/[?&]e=(\d+)/.exec(seen[0])![1]);
+    assert.ok(e > Math.floor(Date.now() / 1000), 'HEAD 用的应是重签后的新 deadline');
+    assert.ok(!seen[0].includes('stale'), '不应带旧 token');
+    assert.equal(out.md, stale, '归档产物仍保留原文 URL（输出时统一重签）');
+
+    // 对照：公开空间/未配置时 HEAD 原文，401 照旧报签名失效
+    seen.length = 0;
+    globalThis.fetch = (async (input: any) => {
+      seen.push(String(input));
+      return new Response(null, { status: 401 });
+    }) as typeof fetch;
+    const pub = await absolutizeImages(stale, undefined, { ...cfg, privateBucket: false });
+    assert.equal(seen[0], 'https://cdn.example.com/img/a.png?e=1000000000&token=ak:stale');
+    assert.match(pub.warnings[0], /签名失效（HTTP 401）/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

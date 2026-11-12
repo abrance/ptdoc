@@ -76,6 +76,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
     const method = req.method || 'GET';
     const isPublic = url.startsWith('/a/') || url.startsWith(LOCAL_ARCHIVE_PREFIX);
     // FR-25：裸斜杠的 doc_key 匹配不到 :id 路由，会静默落进 api.ts 的 GET /api/docs 列表接口
+    // 新增 /api/docs/:id/* 子路由必须同步 http.ts 的 DOC_REF_TAILS_RE，否则该路由会被这里 400
     if (hasBareDocKeySlash(url)) return sendJson(res, 400, { error: DOC_KEY_PATH_ERROR });
     const isArchiveApi = /^\/(api\/archive|api\/share\/\d+|api\/docs\/)/.test(url);
     if (!isPublic && !isArchiveApi) return next();

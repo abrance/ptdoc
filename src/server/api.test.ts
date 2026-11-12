@@ -115,6 +115,10 @@ test('FR-25 尾段白名单：api.ts / archive-api.ts 的 12 种合法子路由�
   assert.equal(hasBareDocKeySlash('/api/docs/7'), false);
   assert.equal(hasBareDocKeySlash('/api/docs?q=ops'), false);
   assert.equal(hasBareDocKeySlash('/a/tok123'), false);
+  // 纯尾斜杠 /api/docs/ 同样不能落进列表接口
+  assert.equal(hasBareDocKeySlash('/api/docs/'), true);
+  assert.equal(hasBareDocKeySlash('/api/docs/?q=ops'), true);
+  assert.equal(hasBareDocKeySlash('/api/docs'), false);
   // 带 query 的裸斜杠同样判非法
   assert.equal(hasBareDocKeySlash('/api/docs/ops/a.md/archive-status?x=1'), true);
 });

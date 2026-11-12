@@ -7,10 +7,16 @@
 # 用法：
 #   QINIU_AK=... QINIU_SK=... QINIU_BUCKET=... QINIU_DOMAIN=https://cdn.example.com \
 #   PTDOC_BASE_URL=http://127.0.0.1:5173 PTDOC_USER=admin PTDOC_PASS=... \
-#     scripts/verify-private-bucket.sh [--allow-remote] [--keep]
+#     scripts/verify-private-bucket.sh [--allow-remote] [--keep] [--restore]
 #
 # 只对 127.0.0.1/localhost 的实例默认放行：脚本会覆盖该实例的存储配置（private_bucket=true, url_ttl=60），
 # 跑到生产实例上会把线上存储配置改掉，所以远端必须显式 --allow-remote。
+#
+# 存储配置收尾：脚本覆盖了存储配置，默认退出时只打印原值提醒，需手动改回；
+# 加 --restore 则退出时（无论成功/失败）自动把原配置 PUT 回去（原实例本来没配置时无法还原，会提示手动处理）。
+#
+# 依赖：curl openssl base64 sed grep。base64 -w0 仅 GNU coreutils 支持，macOS 需 gbase64 -w0
+# 或改用 openssl base64 -A（本脚本用 -w0 是为了不按 76 列折行，换了实现要保持该语义）。
 #
 # 退出码：0 通过；1 断言失败；2 用法/环境问题；3 缺凭证（未执行任何网络请求）。
 
@@ -25,13 +31,15 @@ SK="${QINIU_SK:-}"
 TTL=60
 ALLOW_REMOTE=0
 KEEP=0
+RESTORE=0
 DOC_KEY="ptdoc-private-verify/verify-$(date +%s).md"
 
 for arg in "$@"; do
   case "$arg" in
     --allow-remote) ALLOW_REMOTE=1 ;;
     --keep) KEEP=1 ;;
-    -h | --help) sed -n '2,18p' "$0"; exit 0 ;;
+    --restore) RESTORE=1 ;;
+    -h | --help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "未知参数：$arg" >&2; exit 2 ;;
   esac
 done
@@ -42,7 +50,7 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 die() { printf '\033[31m错误\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
 
 # ── 0. 前置检查 ───────────────────────────────────────────
-for bin in curl openssl; do
+for bin in curl openssl base64 sed grep; do
   command -v "$bin" >/dev/null 2>&1 || die "缺少依赖：$bin" 2
 done
 
@@ -78,12 +86,54 @@ esac
 
 WORK="$(mktemp -d)"
 JAR="$WORK/cookies.txt"
+CONFIG_OVERWRITTEN=0
+ORIG_SUMMARY="（未读取）"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 FAILED=0
 
+# 把 /api/storage 公开 profile 里的一个字段取出来（值可能是字符串/布尔/数字）
+jget() { # file key
+  grep -oE "\"$2\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|true|false|[0-9]+)" "$1" | head -1 |
+    sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*//; s/^"//; s/"$//'
+}
+
+# 收尾：脚本覆盖了实例的存储配置，退出时提醒原值；--restore 则自动 PUT 回去
+restore_storage() {
+  [ "$CONFIG_OVERWRITTEN" = 1 ] || return 0
+  say ""
+  say "== 存储配置收尾"
+  if [ "$RESTORE" = 1 ]; then
+    local code body
+    if [ "$ORIG_SECRET_CONFIGURED" = "true" ] && [ -n "$ORIG_AK" ] && [ -n "$ORIG_BUCKET" ] && [ -n "$ORIG_DOMAIN" ]; then
+      # secret_key 留空 → 服务端沿用库里已保存的密钥（GET /api/storage 不回传密钥）
+      body="$(printf '{"access_key":"%s","bucket":"%s","domain":"%s","zone":"%s","private_bucket":%s,"url_ttl":%s}' \
+        "$ORIG_AK" "$ORIG_BUCKET" "$ORIG_DOMAIN" "$ORIG_ZONE" "$ORIG_PRIVATE" "$ORIG_TTL")"
+      code="$(curl -sS -o /dev/null -m 60 -w '%{http_code}' -b "$JAR" \
+        -X PUT "$BASE_URL/api/storage" -H 'Content-Type: application/json' -d "$body")"
+      if [ "$code" = "200" ]; then
+        say "已还原原存储配置：${ORIG_SUMMARY}"
+      else
+        say "还原原存储配置失败 HTTP ${code}，请手动改回：${ORIG_SUMMARY}"
+      fi
+    else
+      say "原实例本来没有完整存储配置（secret_configured=${ORIG_SECRET_CONFIGURED:-未知}），无法自动还原。"
+      say "当前配置仍是脚本写入的：bucket=${BUCKET} domain=${DOMAIN} private_bucket=true url_ttl=${TTL}"
+      say "记得在设置页改回或清空。"
+    fi
+  else
+    say "存储配置已被脚本覆盖（bucket=${BUCKET} domain=${DOMAIN} private_bucket=true url_ttl=${TTL}）。"
+    say "原值：${ORIG_SUMMARY}"
+    say "记得改回；下次加 --restore 可让脚本退出时自动还原。"
+  fi
+}
+
+on_exit() { restore_storage; cleanup; }
+trap on_exit EXIT
+
 # ── 七牛签名工具 ──────────────────────────────────────────
 # -w0：不加会按 76 列折行，policy 编码后 >76 字符时 token 里会夹换行
+#      注意 -w0 仅 GNU coreutils；macOS 用 gbase64 -w0，或把本函数改成 openssl base64 -A（同样不折行）
 # 保留 '=' 填充：与七牛 SDK（util.base64ToUrlSafe 只替换 +/）逐字节一致
 b64url() { base64 -w0 | tr '+/' '-_'; }
 hmac_sha1_b64url() { printf '%s' "$1" | openssl dgst -sha1 -hmac "$SK" -binary | b64url; }
@@ -165,15 +215,31 @@ LOGIN_CODE="$(curl -sS -o "$WORK/login.json" -m 15 -w '%{http_code}' -c "$JAR" \
   -d "{\"username\":\"${PTDOC_USER}\",\"password\":\"${PTDOC_PASS}\"}")"
 [ "$LOGIN_CODE" = "200" ] || die "登录 $BASE_URL 失败 HTTP ${LOGIN_CODE}：$(cat "$WORK/login.json")" 2
 
+# 先把实例现有的存储配置记下来：下面会覆盖它，退出时要还原/提醒（--restore）
+ORIG_FILE="$WORK/storage-before.json"
+ORIG_CODE="$(curl -sS -o "$ORIG_FILE" -m 15 -w '%{http_code}' -b "$JAR" "$BASE_URL/api/storage")"
+[ "$ORIG_CODE" = "200" ] || die "读取原存储配置失败 HTTP ${ORIG_CODE}：$(cat "$ORIG_FILE")" 2
+ORIG_AK="$(jget "$ORIG_FILE" access_key)"
+ORIG_BUCKET="$(jget "$ORIG_FILE" bucket)"
+ORIG_DOMAIN="$(jget "$ORIG_FILE" domain)"
+ORIG_ZONE="$(jget "$ORIG_FILE" zone)"
+ORIG_PRIVATE="$(jget "$ORIG_FILE" private_bucket)"
+ORIG_TTL="$(jget "$ORIG_FILE" url_ttl)"
+ORIG_SECRET_CONFIGURED="$(jget "$ORIG_FILE" secret_configured)"
+ORIG_SUMMARY="access_key=${ORIG_AK:-空} bucket=${ORIG_BUCKET:-空} domain=${ORIG_DOMAIN:-空} zone=${ORIG_ZONE:-空} private_bucket=${ORIG_PRIVATE:-空} url_ttl=${ORIG_TTL:-空}"
+say "  原存储配置：${ORIG_SUMMARY}"
+
 STORAGE_JSON="$(printf '{"access_key":"%s","secret_key":"%s","bucket":"%s","domain":"%s","zone":"%s","private_bucket":true,"url_ttl":%s}' \
   "$AK" "$SK" "$BUCKET" "$DOMAIN" "$ZONE" "$TTL")"
 SAVE_CODE="$(curl -sS -o "$WORK/storage.json" -m 60 -w '%{http_code}' -b "$JAR" \
   -X PUT "$BASE_URL/api/storage" -H 'Content-Type: application/json' -d "$STORAGE_JSON")"
 [ "$SAVE_CODE" = "200" ] || die "保存存储配置失败 HTTP ${SAVE_CODE}：$(cat "$WORK/storage.json")"
+CONFIG_OVERWRITTEN=1   # 从这里开始，任何退出路径都要还原/提醒
 ok "存储配置已保存（连通性由服务端实测通过）"
 
-# 设置页自检接口顺带验一次（FR-26 的按钮背后就是它）
-SC_CODE="$(curl -sS -o "$WORK/selfcheck.json" -m 60 -w '%{http_code}' -b "$JAR" -X POST "$BASE_URL/api/storage/selfcheck")"
+# 设置页自检接口顺带验一次（FR-26 的按钮背后就是它；接口按请求里的配置自检，不落库）
+SC_CODE="$(curl -sS -o "$WORK/selfcheck.json" -m 60 -w '%{http_code}' -b "$JAR" \
+  -X POST "$BASE_URL/api/storage/selfcheck" -H 'Content-Type: application/json' -d "$STORAGE_JSON")"
 SC_OK="$(sed -nE 's/.*"ok":(true|false).*/\1/p' "$WORK/selfcheck.json")"
 SC_STATUS="$(sed -nE 's/.*"status":([0-9]+).*/\1/p' "$WORK/selfcheck.json")"
 if [ "$SC_CODE" = "200" ] && [ "$SC_OK" = "true" ]; then

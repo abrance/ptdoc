@@ -69,6 +69,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       return next();
 
     // FR-25：裸斜杠的 doc_key 匹配不到 :id 路由，会静默落进下面的列表接口，必须在入口拒掉
+    // 新增 /api/docs/:id/* 子路由必须同步 http.ts 的 DOC_REF_TAILS_RE，否则该路由会被这里 400
     if (hasBareDocKeySlash(url)) return sendJson(res, 400, { error: DOC_KEY_PATH_ERROR });
 
     try {
@@ -108,9 +109,11 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         await verifyConnectivity(cfg);
         return sendJson(res, 200, { ok: true });
       }
-      // FR-26 自检：上传探针图 → 当前配置重签 → HEAD，返回 200/401 与排查提示
+      // FR-26 自检：上传探针图 → 重签 → HEAD。用请求里的表单值（未保存也能测），不落库
       if (url === '/api/storage/selfcheck' && req.method === 'POST') {
-        return sendJson(res, 200, await selfCheckPrivateBucket(uid));
+        const b = await readJson(req);
+        const cfg = parseStorageInput(b, getStorageProfile(uid));
+        return sendJson(res, 200, await selfCheckPrivateBucket(cfg));
       }
       if (url === '/api/storage' && req.method === 'PUT') {
         const b = await readJson(req);

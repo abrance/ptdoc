@@ -227,7 +227,12 @@ export function initSettingsPanel(opts: {
     const hint = document.getElementById('storage-selfcheck-hint') as HTMLElement;
     hint.textContent = '自检中…';
     try {
-      const res = await fetch('/api/storage/selfcheck', { method: 'POST' });
+      // 带上表单当前值：改了没保存也能测（服务端只自检，不落库）
+      const res = await fetch('/api/storage/selfcheck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(collect()),
+      });
       const j = (await res.json()) as {
         ok?: boolean;
         status?: number;

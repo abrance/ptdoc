@@ -156,8 +156,7 @@ export interface PrivateBucketSelfCheck {
  * 私有空间自检（FR-26）：上传一张探针图 → 用当前配置重签 → HEAD，直接给 200/401 与排查方向。
  * 探针用完即删；清理失败不影响结论。
  */
-export async function selfCheckPrivateBucket(userId: number): Promise<PrivateBucketSelfCheck> {
-  const cfg = requireUserStorage(userId);
+export async function selfCheckPrivateBucket(cfg: QiniuConfig): Promise<PrivateBucketSelfCheck> {
   let up: { url: string; key: string };
   try {
     up = await uploadToQiniu(cfg, PROBE_PNG, 'ptdoc-selfcheck.png', 'selfcheck');

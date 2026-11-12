@@ -63,6 +63,8 @@ export function hasBareDocKeySlash(url: string): boolean {
   const path = (url || '').split('?')[0];
   if (!path.startsWith('/api/docs/')) return false;
   const segs = path.slice('/api/docs/'.length).split('/');
+  // 纯尾斜杠 /api/docs/ 是 1 段空串，会落进列表接口，同样是裸斜杠形态
+  if (segs.length === 1 && path.endsWith('/')) return true;
   if (segs.length < 2) return false;
   return !DOC_REF_TAILS_RE.test(segs.slice(1).join('/'));
 }
