@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { getServerEnv } from './env.ts';
 import { HttpError } from './http.ts';
 import { getStorageProfile, upsertStorageProfile, type StorageProfileRow } from './db.ts';
-import { isQiniuZone, testQiniuBucket, type QiniuConfig, type QiniuZone } from './qiniu-uploader.ts';
+import { isQiniuZone, testQiniuBucket, deleteFromQiniu, resignPrivateUrls, uploadToQiniu, type QiniuConfig, type QiniuZone } from './qiniu-uploader.ts';
 
 export interface StoragePublic {
   access_key: string;
@@ -136,6 +136,69 @@ export function optionalUserStorage(userId: number): QiniuConfig | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** 1x1 红色 PNG，自检探针用（70 字节固定图，不读外部文件）。 */
+const PROBE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+export interface PrivateBucketSelfCheck {
+  ok: boolean;
+  status: number;
+  private_bucket: boolean;
+  url: string;
+  hint: string;
+}
+
+/**
+ * 私有空间自检（FR-26）：上传一张探针图 → 用当前配置重签 → HEAD，直接给 200/401 与排查方向。
+ * 探针用完即删；清理失败不影响结论。
+ */
+export async function selfCheckPrivateBucket(cfg: QiniuConfig): Promise<PrivateBucketSelfCheck> {
+  let up: { url: string; key: string };
+  try {
+    up = await uploadToQiniu(cfg, PROBE_PNG, 'ptdoc-selfcheck.png', 'selfcheck');
+  } catch (e) {
+    // 传不上去就谈不上验签：直接把上传错误原样交回去，别伪装成 401
+    return {
+      ok: false,
+      status: 0,
+      private_bucket: cfg.privateBucket,
+      url: '',
+      hint: '探针图上传失败：' + (e as Error).message,
+    };
+  }
+  try {
+    const url = resignPrivateUrls(up.url, cfg);
+    let status = 0;
+    try {
+      const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+      status = res.status;
+    } catch {
+      status = 0;
+    }
+    return {
+      ok: status === 200,
+      status,
+      private_bucket: cfg.privateBucket,
+      url,
+      hint: selfCheckHint(status, cfg.privateBucket),
+    };
+  } finally {
+    await deleteFromQiniu(cfg, up.key).catch(() => {});
+  }
+}
+
+export function selfCheckHint(status: number, privateBucket: boolean): string {
+  if (status === 200) return privateBucket ? '私有空间签名可用' : '公有空间可直连（重签是恒等操作）';
+  if (status === 401 || status === 403) {
+    return '签名被拒：检查 AccessKey/SecretKey 是否与 bucket 同账号、Domain 是否带协议头（https://…）、bucket 是否确认已设为私有';
+  }
+  if (status === 404) return '对象不存在：检查 Domain 是否指向该 bucket 的绑定域名，以及探针图是否真的传上去了';
+  if (status === 0) return 'HEAD 没连上：检查 Domain 解析与网络可达性';
+  return `域名返回 HTTP ${status}：检查 CDN/回源配置`;
 }
 
 export async function saveVerifiedProfile(userId: number, cfg: QiniuConfig): Promise<StoragePublic> {

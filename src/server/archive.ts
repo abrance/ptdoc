@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { buildShareHtmlDoc } from '../core/share-html.ts';
 import { inlineCssVars, renderMermaidToSvg } from '../core/mermaid.ts';
-import { deleteFromQiniu, uploadToQiniuWithKey } from './qiniu-uploader.ts';
-import { requireUserStorage } from './storage.ts';
+import { deleteFromQiniu, resignPrivateUrls, uploadToQiniuWithKey, type QiniuConfig } from './qiniu-uploader.ts';
+import { optionalUserStorage, requireUserStorage } from './storage.ts';
 import { HttpError } from './http.ts';
 import {
   ensureArchivePath,
@@ -146,35 +146,52 @@ async function uploadMermaidBlocks(
   return { md: out, warnings };
 }
 
-async function headOk(url: string): Promise<boolean> {
+async function headStatus(url: string): Promise<number> {
   try {
     const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
-    return res.ok;
+    return res.status;
   } catch {
-    return false;
+    return 0;
   }
 }
 
-/** 图片绝对化 + 逐个 HEAD 校验，失败项列出来（不静默）。 */
-async function absolutizeImages(
+/** HEAD 状态码 → 告警文案：签名失效（401/403）与资源不存在（404）必须区分开，排查方向不同。 */
+export function imageWarningFor(status: number, url: string): string {
+  if (status === 401 || status === 403) return `图片签名失效（HTTP ${status}）：${url}`;
+  if (status === 404) return `图片不存在（HTTP 404）：${url}`;
+  if (status === 0) return `图片不可访问：${url}`;
+  return `图片不可访问（HTTP ${status}）：${url}`;
+}
+
+/**
+ * 图片绝对化 + 逐个 HEAD 校验，失败项列出来（不静默）。
+ * 私有桶的 URL 在正文里是上传当时签的，归档时多半已过期 → HEAD 前先按当前配置重签一次，
+ * 否则稳定误报「签名失效(401)」（输出时还会重签，图其实是好的）。
+ */
+export async function absolutizeImages(
   md: string,
   publicOrigin: string | undefined,
+  privateCfg?: QiniuConfig,
 ): Promise<{ md: string; warnings: string[] }> {
   const seen = new Map<string, boolean>();
   const warnings: string[] = [];
   const matches = [...md.matchAll(IMAGE_RE)];
+  // 公开空间是恒等函数，未配置时直接 HEAD 原文
+  const headTarget = (url: string): string => (privateCfg ? resignPrivateUrls(url, privateCfg) : url);
   for (const m of matches) {
     const src = m[2];
     if (!src || src.startsWith('data:')) continue;
     if (seen.has(src)) continue;
     seen.set(src, true);
     if (/^http:\/\//i.test(src) || /^https:\/\//i.test(src)) {
-      if (!(await headOk(src))) warnings.push(`图片不可访问：${src}`);
+      const st = await headStatus(headTarget(src));
+      if (st < 200 || st >= 300) warnings.push(imageWarningFor(st, src));
       continue;
     }
     if (src.startsWith('//')) {
       const abs = 'https:' + src;
-      if (!(await headOk(abs))) warnings.push(`图片不可访问：${abs}`);
+      const st = await headStatus(headTarget(abs));
+      if (st < 200 || st >= 300) warnings.push(imageWarningFor(st, abs));
       continue;
     }
     if (!publicOrigin) {
@@ -205,7 +222,11 @@ export async function prepareArchiveMarkdown(
   // [[站内链接]] → 人可读文本（M1 不生成产物间互链）
   const text = content.replace(WIKI_LINK_RE, (_f, target: string, label?: string) => (label ?? target).trim());
   const mermaid = await uploadMermaidBlocks(userId, text, storage);
-  const images = await absolutizeImages(mermaid.md, process.env.PTDOC_PUBLIC_ORIGIN);
+  const images = await absolutizeImages(
+    mermaid.md,
+    process.env.PTDOC_PUBLIC_ORIGIN,
+    optionalUserStorage(userId),
+  );
   return { md: images.md, imageWarnings: [...mermaid.warnings, ...images.warnings] };
 }
 

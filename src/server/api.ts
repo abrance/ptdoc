@@ -1,9 +1,9 @@
 import type { Connect } from 'vite';
-import { buildShareHtmlDoc } from '../core/share-html';
-import { deleteFromQiniu, resignPrivateUrls } from './qiniu-uploader';
-import { optionalUserStorage, requireUserStorage } from './storage';
-import { HttpError, readJson, sendJson } from './http';
-import { requireUser } from './auth';
+import { buildShareHtmlDoc } from '../core/share-html.ts';
+import { deleteFromQiniu, resignPrivateUrls } from './qiniu-uploader.ts';
+import { optionalUserStorage, requireUserStorage } from './storage.ts';
+import { DOC_KEY_PATH_ERROR, HttpError, hasBareDocKeySlash, readJson, sendJson } from './http.ts';
+import { requireUser } from './auth.ts';
 import {
   initDB,
   upsertDoc,
@@ -40,9 +40,9 @@ import {
   createArchiveFolder,
   renameArchiveFolder,
   deleteArchiveFolder,
-} from './db';
-import { parseStorageInput, saveVerifiedProfile, toPublicProfile, verifyConnectivity } from './storage';
-import { syncArchiveToQdrant } from './archive-qdrant';
+} from './db.ts';
+import { parseStorageInput, saveVerifiedProfile, selfCheckPrivateBucket, toPublicProfile, verifyConnectivity } from './storage.ts';
+import { syncArchiveToQdrant } from './archive-qdrant.ts';
 
 /** 私有空间下库里的图片链接是上传当时签的，输出前现签一遍（公开空间原样返回）。 */
 function freshUrls(userId: number, text: string): string {
@@ -67,6 +67,10 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       !url.startsWith('/s/')
     )
       return next();
+
+    // FR-25：裸斜杠的 doc_key 匹配不到 :id 路由，会静默落进下面的列表接口，必须在入口拒掉
+    // 新增 /api/docs/:id/* 子路由必须同步 http.ts 的 DOC_REF_TAILS_RE，否则该路由会被这里 400
+    if (hasBareDocKeySlash(url)) return sendJson(res, 400, { error: DOC_KEY_PATH_ERROR });
 
     try {
       initDB();
@@ -104,6 +108,12 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         const cfg = parseStorageInput(b, getStorageProfile(uid));
         await verifyConnectivity(cfg);
         return sendJson(res, 200, { ok: true });
+      }
+      // FR-26 自检：上传探针图 → 重签 → HEAD。用请求里的表单值（未保存也能测），不落库
+      if (url === '/api/storage/selfcheck' && req.method === 'POST') {
+        const b = await readJson(req);
+        const cfg = parseStorageInput(b, getStorageProfile(uid));
+        return sendJson(res, 200, await selfCheckPrivateBucket(cfg));
       }
       if (url === '/api/storage' && req.method === 'PUT') {
         const b = await readJson(req);

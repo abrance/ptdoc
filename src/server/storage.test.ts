@@ -12,6 +12,7 @@ import {
   parseStorageInput,
   requireUserStorage,
   saveVerifiedProfile,
+  selfCheckHint,
   setConnectivityTesterForTests,
   toPublicProfile,
 } from './storage.ts';
@@ -89,4 +90,17 @@ test('parseStorageInput 校验必填字段', () => {
   boot();
   assert.throws(() => parseStorageInput({}), /请填写/);
   closeDB();
+});
+
+test('FR-26 自检提示：401 指向 AK/SK 与私有设置，404 指向域名/对象，200 说明结论', () => {
+  assert.match(selfCheckHint(200, true), /私有空间签名可用/);
+  assert.match(selfCheckHint(200, false), /公有空间/);
+  for (const st of [401, 403]) {
+    const h = selfCheckHint(st, true);
+    assert.match(h, /AccessKey\/SecretKey/);
+    assert.match(h, /私有/);
+  }
+  assert.match(selfCheckHint(404, true), /Domain|域名/);
+  assert.match(selfCheckHint(0, true), /没连上/);
+  assert.match(selfCheckHint(500, true), /HTTP 500/);
 });
