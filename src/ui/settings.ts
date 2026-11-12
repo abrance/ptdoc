@@ -107,8 +107,10 @@ export function initSettingsPanel(opts: {
         <label>签名有效期（秒）<input name="url_ttl" type="number" min="60" value="3600" /></label>
         <div class="settings-ops">
           <button type="button" id="storage-test">测试连通性</button>
+          <button type="button" id="storage-selfcheck">私有空间自检</button>
           <button type="submit">保存</button>
         </div>
+        <p class="settings-hint" id="storage-selfcheck-hint"></p>
       </form>`;
     body('llm').innerHTML = `
       <form id="llm-form" class="settings-form">
@@ -157,6 +159,7 @@ export function initSettingsPanel(opts: {
   const bindSectionActions = (): void => {
     retentionFill = initRetentionSection({ onStatus: opts.onStatus }).fill;
     document.getElementById('storage-test')!.addEventListener('click', () => void test());
+    document.getElementById('storage-selfcheck')!.addEventListener('click', () => void selfCheck());
     document.getElementById('password-save')!.addEventListener('click', () => void changePassword());
     document.getElementById('llm-save')!.addEventListener('click', () => void saveLlm());
     document.getElementById('qdrant-save')!.addEventListener('click', () => void saveQdrant());
@@ -216,6 +219,28 @@ export function initSettingsPanel(opts: {
       await fill();
     } catch (e) {
       opts.onStatus((e as Error).message, true);
+    }
+  };
+
+  /** FR-26 私有空间自检：服务端传探针图 → 重签 → HEAD，这里只展示 200 / 401 与提示。 */
+  const selfCheck = async (): Promise<void> => {
+    const hint = document.getElementById('storage-selfcheck-hint') as HTMLElement;
+    hint.textContent = '自检中…';
+    try {
+      const res = await fetch('/api/storage/selfcheck', { method: 'POST' });
+      const j = (await res.json()) as {
+        ok?: boolean;
+        status?: number;
+        private_bucket?: boolean;
+        hint?: string;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(j.error || '自检失败');
+      hint.textContent = j.ok
+        ? `HEAD ${j.status}：${j.hint || '签名可用'}`
+        : `HEAD ${j.status || '失败'}：${j.hint || '签名不可用'}`;
+    } catch (e) {
+      hint.textContent = '自检失败：' + (e as Error).message;
     }
   };
 

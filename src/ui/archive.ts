@@ -182,11 +182,40 @@ function applyStatus(patch: Partial<ArchiveStatus>): void {
   paintToolbar();
 }
 
-function showResultLink(publicUrl: string): void {
+type WarnKind = 'sign' | 'missing' | 'other';
+
+const WARN_TAG: Record<WarnKind, string> = { sign: '签名失效 401', missing: '不存在 404', other: '不可访问' };
+
+/** 服务端告警文案已带状态码（FR-26），这里只分类展示，不重算。 */
+function warnKind(w: string): WarnKind {
+  if (/（HTTP 40[13]）/.test(w)) return 'sign';
+  if (/（HTTP 404）/.test(w)) return 'missing';
+  return 'other';
+}
+
+function warnSummary(warnings: string[]): string {
+  const count: Record<WarnKind, number> = { sign: 0, missing: 0, other: 0 };
+  for (const w of warnings) count[warnKind(w)]++;
+  const parts: string[] = [];
+  if (count.sign) parts.push(`${count.sign} 张图签名失效(401)`);
+  if (count.missing) parts.push(`${count.missing} 张图不存在(404)`);
+  if (count.other) parts.push(`${count.other} 张图不可访问`);
+  return parts.join('，');
+}
+
+function showResultLink(publicUrl: string, warnings: string[] = []): void {
   const box = $('archive-result');
   const url = absolute(publicUrl);
   ($('archive-result-url') as HTMLElement).textContent = url;
   box.dataset.url = url;
+  const list = $('archive-result-warnings');
+  list.innerHTML = warnings
+    .map((w) => {
+      const kind = warnKind(w);
+      return `<li><span class="archive-warn-tag is-${kind}">${WARN_TAG[kind]}</span><span>${esc(w)}</span></li>`;
+    })
+    .join('');
+  list.hidden = warnings.length === 0;
   box.hidden = false;
   clearTimeout(resultTimer);
   resultTimer = window.setTimeout(() => {
@@ -214,15 +243,22 @@ async function runArchive(ref: string): Promise<void> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note }),
     });
-    const data = await readJson<{ id: number; version: number; token: string; public_url: string; unchanged?: boolean }>(
-      res,
-    );
+    const data = await readJson<{
+      id: number;
+      version: number;
+      token: string;
+      public_url: string;
+      unchanged?: boolean;
+      image_warnings?: string[];
+    }>(res);
     if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    const warnings = data.image_warnings ?? [];
     applyStatus({ stale: false, version: Number(data.version) || toolbarStatus.version + 1, token: data.token ?? null });
-    showResultLink(data.public_url);
+    showResultLink(data.public_url, warnings);
+    const warn = warnings.length ? `；${warnSummary(warnings)}` : '';
     showToast(
-      data.unchanged ? `内容未变化，已生成 v${data.version}` : `已归档 v${data.version}`,
-      data.unchanged ? 'info' : 'success',
+      (data.unchanged ? `内容未变化，已生成 v${data.version}` : `已归档 v${data.version}`) + warn,
+      warnings.length ? 'error' : data.unchanged ? 'info' : 'success',
     );
     void refreshArchiveList();
   } catch (e) {
@@ -390,11 +426,13 @@ async function reArchive(ref: string): Promise<void> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note }),
     });
-    const data = await readJson<{ version: number; unchanged?: boolean }>(res);
+    const data = await readJson<{ version: number; unchanged?: boolean; image_warnings?: string[] }>(res);
     if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    const warnings = data.image_warnings ?? [];
     showToast(
-      data.unchanged ? `内容未变化，已生成 v${data.version}` : `已归档 v${data.version}`,
-      data.unchanged ? 'info' : 'success',
+      (data.unchanged ? `内容未变化，已生成 v${data.version}` : `已归档 v${data.version}`) +
+        (warnings.length ? `；${warnSummary(warnings)}` : ''),
+      warnings.length ? 'error' : data.unchanged ? 'info' : 'success',
     );
     const cur = getRef();
     if (cur && cur === ref) void refreshArchiveStatus({ force: true });

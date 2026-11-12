@@ -12,7 +12,13 @@ import {
   archiveStatusOf,
   upsertDoc,
 } from './db.ts';
-import { archiveDoc, getArchiveStorage, prepareArchiveMarkdown, setArchiveStorageForTests } from './archive.ts';
+import {
+  archiveDoc,
+  getArchiveStorage,
+  imageWarningFor,
+  prepareArchiveMarkdown,
+  setArchiveStorageForTests,
+} from './archive.ts';
 
 function freshProject(): { dir: string; docId: number } {
   const dir = mkdtempSync(join(tmpdir(), 'ptdoc-arch-'));
@@ -116,4 +122,14 @@ test('getArchiveStorage：未配置存储且非 local 时报 503', () => {
   delete process.env.PTDOC_ARCHIVE_STORAGE;
   assert.throws(() => getArchiveStorage(1), /对象存储未配置/);
   closeDB();
+});
+
+test('FR-26 图片告警区分签名失效(401)与资源不存在(404)', () => {
+  const u = 'https://file.example.com/a.png';
+  assert.match(imageWarningFor(401, u), /签名失效（HTTP 401）/);
+  assert.match(imageWarningFor(403, u), /签名失效（HTTP 403）/, '403 也是签名/权限问题，归到同一类');
+  assert.match(imageWarningFor(404, u), /图片不存在（HTTP 404）/);
+  assert.match(imageWarningFor(502, u), /图片不可访问（HTTP 502）/, '其他状态码保留原状态，不硬塞进 401/404');
+  assert.equal(imageWarningFor(0, u), `图片不可访问：${u}`, '连不上（DNS/超时）保持原文案');
+  for (const st of [0, 401, 403, 404, 500]) assert.ok(imageWarningFor(st, u).includes(u), '文案必须带 URL');
 });

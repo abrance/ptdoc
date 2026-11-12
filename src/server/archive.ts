@@ -146,13 +146,21 @@ async function uploadMermaidBlocks(
   return { md: out, warnings };
 }
 
-async function headOk(url: string): Promise<boolean> {
+async function headStatus(url: string): Promise<number> {
   try {
     const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
-    return res.ok;
+    return res.status;
   } catch {
-    return false;
+    return 0;
   }
+}
+
+/** HEAD 状态码 → 告警文案：签名失效（401/403）与资源不存在（404）必须区分开，排查方向不同。 */
+export function imageWarningFor(status: number, url: string): string {
+  if (status === 401 || status === 403) return `图片签名失效（HTTP ${status}）：${url}`;
+  if (status === 404) return `图片不存在（HTTP 404）：${url}`;
+  if (status === 0) return `图片不可访问：${url}`;
+  return `图片不可访问（HTTP ${status}）：${url}`;
 }
 
 /** 图片绝对化 + 逐个 HEAD 校验，失败项列出来（不静默）。 */
@@ -169,12 +177,14 @@ async function absolutizeImages(
     if (seen.has(src)) continue;
     seen.set(src, true);
     if (/^http:\/\//i.test(src) || /^https:\/\//i.test(src)) {
-      if (!(await headOk(src))) warnings.push(`图片不可访问：${src}`);
+      const st = await headStatus(src);
+      if (st < 200 || st >= 300) warnings.push(imageWarningFor(st, src));
       continue;
     }
     if (src.startsWith('//')) {
       const abs = 'https:' + src;
-      if (!(await headOk(abs))) warnings.push(`图片不可访问：${abs}`);
+      const st = await headStatus(abs);
+      if (st < 200 || st >= 300) warnings.push(imageWarningFor(st, abs));
       continue;
     }
     if (!publicOrigin) {
