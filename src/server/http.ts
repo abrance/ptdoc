@@ -53,7 +53,7 @@ export const DOC_KEY_PATH_ERROR = 'doc_key 作为路径参数需 URL 转义（op
  * 新增 /api/docs/:id/* 子路由时必须把尾段加进这里，否则那条路由会被当成裸斜杠 doc_key 直接 400。
  */
 const DOC_REF_TAILS_RE =
-  /^(?:rename|archive|archive-status|archive\/rotate-token|archive-path|qdrant-sync|snapshots(?:\/\d+)?(?:\/restore)?|versions(?:\/\d+)?(?:\/restore)?)$/;
+  /^(?:rename|move|reorder|archive|archive-status|archive\/rotate-token|archive-path|qdrant-sync|snapshots(?:\/\d+)?(?:\/restore)?|versions(?:\/\d+)?(?:\/restore)?)$/;
 
 /**
  * doc_key 作为路径参数时出现裸斜杠（多段）→ 匹配不到任何 :id 路由，会静默落进 GET /api/docs 列表接口。
