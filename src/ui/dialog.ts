@@ -100,9 +100,39 @@ export async function askNote(opts: {
   return ok ? input.value.trim() : null;
 }
 
-/** 输入框。取消 / Esc / 点遮罩 → null。 */
-export async function askText(opts: {
+/** 下拉选择。取消 / Esc / 点遮罩 → null；确定 → 选中的 value。 */
+export async function askSelect(opts: {
   title: string;
+  message?: string;
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  value?: string;
+  confirmLabel?: string;
+}): Promise<string | null> {
+  const optionsHtml = opts.options
+    .map(
+      (o) =>
+        `<option value="${esc(o.value)}"${o.value === opts.value ? ' selected' : ''}>${esc(o.label)}</option>`,
+    )
+    .join('');
+  const body =
+    (opts.message ? `<div class="dialog-body">${esc(opts.message)}</div>` : '') +
+    `<label class="dialog-field">${esc(opts.label)}
+       <select name="value">${optionsHtml}</select>
+     </label>`;
+  const { dlg, result } = mountDialog(
+    opts.title,
+    body,
+    `<button type="button" data-act="cancel">取消</button>
+     <button type="submit" value="ok" class="btn-primary">${esc(opts.confirmLabel ?? '确定')}</button>`,
+  );
+  const select = dlg.querySelector('select') as HTMLSelectElement;
+  select.focus();
+  return (await result) === 'ok' ? select.value : null;
+}
+
+/** 输入框。取消 / Esc / 点遮罩 → null。 */
+export async function askText(opts: {  title: string;
   label: string;
   value?: string;
   /** 密码类输入用 password，不回显（原生 prompt 是明文的） */

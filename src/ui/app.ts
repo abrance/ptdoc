@@ -2,7 +2,8 @@ import { siteConfig } from '../config';
 import { renderMarkdown } from '../core/markdown';
 import { renderMermaidBlocks } from '../core/mermaid';
 import MiniSearch from 'minisearch';
-import { saveHandle, getHandle, setHandleUser } from './fileHandles';
+import { saveHandle, getHandle, removeHandle, setHandleUser } from './fileHandles';
+import { askConfirm } from './dialog';
 import { renderToc, attachTocScrollHighlight } from './toc';
 import { initSidebar } from './sidebar';
 import { initMediaPanel } from './media';
@@ -570,12 +571,12 @@ mdInput.addEventListener('change', async () => {
 });
 
 /** 统一把文档内容载入编辑器并落库（同时更新"最近打开"时间）。 */
-function loadContent(docKey: string, filename: string, content: string): void {
+function loadContent(docKey: string, filename: string, content: string, docId: number | null = null): void {
   editor.value = content;
   currentDocKey = docKey;
   currentFilename = filename;
-  // 新文档的 id 要等保存回来才知道，先置空，避免拿上一篇的 id 去查归档状态
-  currentDocId = null;
+  // 按 id 打开时立刻拿到 id（删除/归档状态都依赖它）；其余来源等保存回来再填
+  currentDocId = docId;
   markArchiveStatusUnknown();
   render();
   syncChrome();
@@ -884,7 +885,7 @@ async function openDocById(id: number): Promise<void> {
         const file = await handle.getFile();
         const content = await file.text();
         setDocSource('disk', '磁盘实时', '通过已保存的文件句柄读取了磁盘上的最新内容；下次打开仍会自动重读');
-        loadContent(doc.doc_key, doc.filename, content);
+        loadContent(doc.doc_key, doc.filename, content, id);
         setStatus('已打开（磁盘实时）：' + doc.filename);
         return;
       } catch {
@@ -894,7 +895,7 @@ async function openDocById(id: number): Promise<void> {
           '数据库快照',
           '文件句柄失效（文件可能已被移动/删除，或浏览器权限丢失），无法重读磁盘，已回退到上次保存的快照',
         );
-        loadContent(doc.doc_key, doc.filename, doc.content);
+        loadContent(doc.doc_key, doc.filename, doc.content, id);
         setStatus('已打开（数据库快照）：' + doc.filename + '。文件句柄失效，无法重读磁盘');
         return;
       }
@@ -904,7 +905,7 @@ async function openDocById(id: number): Promise<void> {
       '数据库快照',
       '未保存文件句柄（该文件不是通过系统文件选择器打开的），无法自动重读磁盘，显示的是上次保存的快照',
     );
-    loadContent(doc.doc_key, doc.filename, doc.content);
+    loadContent(doc.doc_key, doc.filename, doc.content, id);
     setStatus('已打开（数据库快照）：' + doc.filename + '。未保存文件句柄，无法重读磁盘');
   } catch (e) {
     setStatus('打开失败：' + (e as Error).message, true);
@@ -1087,6 +1088,36 @@ void startGate((user: SessionUser) => {
     },
   });
 
+  // 删除当前文档：只在这里（文档区工具栏）提供入口，侧栏树里不再有删除按钮。
+  $('doc-delete').addEventListener('click', () => {
+    void deleteCurrentDoc();
+  });
+
   void refreshDocsIndex();
   loadDefaultDoc();
 });
+
+/** 文档区工具栏的删除：二次确认 → DELETE /api/docs/:id → 回到默认文档。 */
+async function deleteCurrentDoc(): Promise<void> {
+  if (currentDocId == null) {
+    setStatus('当前文档还没保存，无法删除', true);
+    return;
+  }
+  const title = currentDocKey || currentFilename || '当前文档';
+  const ok = await askConfirm(
+    `删除「${title}」？\n仅删除工作区记录与已发布归档，不影响磁盘原文件与图床。`,
+    { title: '删除文档', confirmLabel: '删除', danger: true },
+  );
+  if (!ok) return;
+  try {
+    const res = await fetch('/api/docs/' + currentDocId, { method: 'DELETE' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await removeHandle(currentDocKey);
+    currentDocId = null;
+    setStatus('已删除：' + title);
+    await sidebarRef?.refresh();
+    await loadDefaultDoc();
+  } catch (e) {
+    setStatus('删除失败：' + (e as Error).message, true);
+  }
+}

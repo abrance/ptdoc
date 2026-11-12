@@ -125,7 +125,16 @@
                 <svg class="icon"><use href="#i-folder"></use></svg>
               </button>
             </div>
-            <nav id="sidebar-tree" class="sidebar-tree" aria-label="文档树"></nav>
+            <div id="space-bar" class="space-bar">
+              <div id="space-list" class="space-list" role="tablist" aria-label="空间列表"></div>
+              <button id="space-new" class="icon-btn" type="button" title="新建空间" aria-label="新建空间">
+                <svg class="icon"><use href="#i-plus"></use></svg>
+              </button>
+            </div>
+            <div class="space-tools">
+              <button id="folder-new" class="space-tool-btn" type="button" title="在当前空间根目录新建目录">＋ 目录</button>
+            </div>
+            <nav id="sidebar-tree" class="sidebar-tree" aria-label="空间文档树"></nav>
           </div>
           <div class="sider-page" data-page="agent">
             <section class="nav-group">
@@ -194,6 +203,7 @@
                   <div class="action-group action-secondary" id="action-secondary">
                     <button id="toc-toggle" type="button">目录</button>
                     <button id="snapshots" type="button">版本</button>
+                    <button id="doc-delete" type="button" class="is-danger" title="删除当前文档">删除</button>
                   </div>
                   <details id="more-menu" class="menu">
                     <summary>更多</summary>
