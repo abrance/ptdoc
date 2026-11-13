@@ -6,7 +6,7 @@
  */
 
 /** `data-retry` 的值：点重试时按这个值决定重跑哪个加载函数。 */
-export type RetryTarget = 'history' | 'nav-convs' | 'search-index';
+export type RetryTarget = 'history' | 'nav-convs' | 'search-index' | 'versions';
 
 export function emptyStateHtml(text: string): string {
   return `<li class="empty">${escapeHtml(text)}</li>`;

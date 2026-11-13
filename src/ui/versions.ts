@@ -1,4 +1,5 @@
 import { askConfirm, askText } from './dialog.ts';
+import { errorStateHtml } from './list-state.ts';
 import { showToast } from './toast.ts';
 
 // ─── 版本时间线（M2-4）────────────────────────────────────
@@ -185,6 +186,10 @@ export function initVersionsDrawer(opts: VersionsDrawerOptions): {
         void loadMore();
         return;
       }
+      if (el.closest('[data-retry]')) {
+        void load(false);
+        return;
+      }
       const btn = el.closest<HTMLElement>('button[data-op]');
       const li = el.closest<HTMLElement>('.snapshot-item');
       if (!btn || !li) return;
@@ -269,7 +274,8 @@ export function initVersionsDrawer(opts: VersionsDrawerOptions): {
       applyPage({ items: clean, next_cursor: body.next_cursor ?? null }, append);
     } catch (e) {
       ensure();
-      $('version-list').innerHTML = '<li class="empty">加载失败：' + esc((e as Error).message) + '</li>';
+      // 500 以前只印一行「加载失败」，点不回去；按钮的回调挂在 #version-list 上（见上面的事件委托）。
+      $('version-list').innerHTML = errorStateHtml('版本列表加载失败：' + (e as Error).message, 'versions');
     } finally {
       loading = false;
     }
