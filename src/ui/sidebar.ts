@@ -1,6 +1,5 @@
 import { removeHandle } from './fileHandles';
 import { askConfirm, askSelect, askText } from './dialog';
-import { showToast } from './toast';
 import {
   applyDocPlacement,
   applyFolderPlacement,
@@ -67,10 +66,10 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   let rowMenu: HTMLElement | null = null;
   let rowMenuCleanup: (() => void) | null = null;
 
-  /** 失败反馈：状态栏 + toast，保证操作结果看得见。 */
+  /** 失败反馈：只走 onStatus（它内部已经发 toast）。以前这里再补一条 showToast，
+   *  同一句错误会弹两次。 */
   function fail(msg: string): void {
     opts.onStatus?.(msg, true);
-    showToast(msg, 'error');
   }
 
   async function api<T>(url: string, init?: RequestInit): Promise<T> {

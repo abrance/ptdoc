@@ -1011,6 +1011,11 @@ body.sidebar-collapsed .sidebar {
   min-height: 0;
 }
 
+/* 没有会话时不渲染可观测面板，右列一并收起（否则留 260px 空白）。 */
+.agent-page .agent-body.no-obs {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .agent-page .agent-main {
   display: flex;
   flex-direction: column;
@@ -2259,6 +2264,25 @@ body.toc-on .preview-pane {
   text-align: center;
 }
 
+/* 「取不到」不是「真的空」：错误态用独立类名 + 可点的重试。
+   两者共用同一套灰字会让用户分不出「没有记录」和「请求挂了」。 */
+.history-list .load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--danger);
+  text-align: center;
+}
+
+.history-list .load-retry {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2442,6 +2466,20 @@ body.toc-on .preview-pane {
 
 .toast-success {
   border-left-color: var(--success);
+}
+
+/* 带操作的提示：文字在上、按钮在下，按钮可点（容器本身 pointer-events: none）。 */
+.toast.has-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.toast-action {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12px;
 }
 
 .toast.out {

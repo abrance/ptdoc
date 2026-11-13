@@ -15,6 +15,8 @@ import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
 import { initVersionsDrawer } from './versions';
 import { showToast } from './toast';
+import { paintStatus } from './status-line';
+import { emptyStateHtml, errorStateHtml, type RetryTarget } from './list-state';
 import {
   initArchivePage,
   initArchiveToolbar,
@@ -72,10 +74,12 @@ function scheduleRender(): void {
   renderTimer = window.setTimeout(render, 200);
 }
 function setStatus(msg: string, isError = false): void {
-  statusEl.textContent = msg;
-  statusEl.className = 'status' + (isError ? ' error' : '');
-  // 错误另外弹一个会自己消失的提示：状态栏那行会被下一次操作覆盖，容易直接错过
-  if (isError && msg) showToast(msg, 'error');
+  // 错误只走 toast 这一条通路：状态栏写「操作失败」标记，具体原因在 toast 里只说一次。
+  // 以前两处都写同一句，屏幕上出现两遍；分工与理由见 status-line.ts。
+  const p = paintStatus(msg, isError);
+  statusEl.textContent = p.text;
+  statusEl.className = 'status' + (p.error ? ' error' : '');
+  if (p.toast) showToast(p.toast, 'error');
 }
 
 // ─── 保存状态（状态栏右侧，和瞬时提示分开）────────────────
@@ -136,6 +140,8 @@ function readPrefs(): Prefs {
   try {
     return JSON.parse(localStorage.getItem(PREF_KEY) ?? '{}') as Prefs;
   } catch {
+    // 忽略理由：偏好只是宽高/主题这类视图状态，读不到就用默认值。
+    // 这是一个真·空值场景（从没写过或写坏了），不是「取不到服务端数据」，不需要 error 态。
     return {};
   }
 }
@@ -144,7 +150,8 @@ function writePref<K extends keyof Prefs>(key: K, value: Prefs[K]): void {
   try {
     localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPrefs(), [key]: value }));
   } catch {
-    /* 隐私模式禁用 localStorage：忽略，不影响功能 */
+    // 忽略理由：隐私模式 / 存储配额满时 localStorage 会直接抛。
+    // 偏好写不进去只影响「下次打开还是默认布局」，不能因此拦住用户的正常编辑。
   }
 }
 
@@ -458,7 +465,8 @@ async function saveCurrentDoc(): Promise<void> {
       void refreshArchiveStatus();
     }
   } catch {
-    /* 离线时静默忽略，但状态栏要如实显示 */
+    // 故意不弹 toast：自动保存在每次输入后静默跑，离线时每 800ms 弹一条会淹没界面。
+    // 错误态由状态栏右侧的「未保存（离线）」承担，用户一眼可见且不抢焦点。
     if (seq === saveSeq) setSaveState('error');
   }
 }
@@ -505,7 +513,8 @@ function uploadBinary(
       try {
         data = JSON.parse(xhr.responseText);
       } catch {
-        /* ignore */
+        // 忽略理由：响应不是 JSON（例如网关返回了 HTML 错误页）。
+        // 下面统一用 status 判定并 reject，不把解析失败当成单独的错误。
       }
       if (xhr.status >= 200 && xhr.status < 300 && !data.error) resolve(data);
       else reject(new Error(data.error || 'HTTP ' + xhr.status));
@@ -618,7 +627,9 @@ async function refreshDocsIndex(): Promise<void> {
     const docs = (await res.json()) as Array<{ id: number; doc_key: string }>;
     docsIndex = new Map(docs.map((d) => [d.doc_key, d.id]));
   } catch {
-    /* 离线时保持旧索引 */
+    // 忽略理由：离线时保留上一份索引，互链最多点不动，不影响编辑/渲染。
+    // 若真为空（首次就离线），下方 resolveDocKey 返回 null，链接会回退为普通跳转。
+    // 不弹错误态：这是后台预热调用，用户没主动发起，弹错只会干扰。
   }
 }
 
@@ -735,11 +746,11 @@ function renderSearchResults(q: string, list: HTMLElement): void {
       30,
     );
   } catch {
-    list.innerHTML = '<li class="empty">搜索失败</li>';
+    list.innerHTML = errorStateHtml('搜索失败，可能是本地索引损坏', 'search-index');
     return;
   }
   if (results.length === 0) {
-    list.innerHTML = '<li class="empty">没有匹配的文档</li>';
+    list.innerHTML = emptyStateHtml('没有匹配的文档');
     return;
   }
   results.forEach((h, idx) => {
@@ -766,7 +777,7 @@ async function refreshHistory(q: string): Promise<void> {
     try {
       await ensureSearchIndex();
     } catch {
-      list.innerHTML = '<li class="empty">索引加载失败</li>';
+      list.innerHTML = errorStateHtml('索引加载失败（网络或服务端不可用）', 'search-index');
       return;
     }
     renderSearchResults(q.trim(), list);
@@ -782,7 +793,7 @@ async function refreshHistory(q: string): Promise<void> {
     historyItems = docs.map((d) => ({ id: d.id, doc_key: d.doc_key }));
     historyActive = -1;
     if (docs.length === 0) {
-      list.innerHTML = '<li class="empty">暂无记录</li>';
+      list.innerHTML = emptyStateHtml('暂无记录');
       return;
     }
     docs.forEach((d, idx) => {
@@ -801,7 +812,8 @@ async function refreshHistory(q: string): Promise<void> {
     });
     historyActive = 0;
   } catch {
-    list.innerHTML = '<li class="empty">加载失败</li>';
+    // 「取不到列表」不是「没有记录」：以前两者都是同一套灰字空行。
+    list.innerHTML = errorStateHtml('最近打开加载失败', 'history');
   }
 }
 
@@ -847,17 +859,26 @@ let navScene: 'qa' | 'writer' = 'qa';
 
 async function refreshNavConvs(): Promise<void> {
   const list = $('nav-convs');
+  let failed = false;
   try {
-    const rows = (await (await fetch('/api/agents/conversations?scene=' + navScene)).json()) as NavConv[];
+    const res = await fetch('/api/agents/conversations?scene=' + navScene);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const rows = (await res.json()) as NavConv[];
     navConvs = rows || [];
   } catch {
+    // 取不到会话不等于没有会话：下面的「暂无会话」会骗人，所以分开渲染。
     navConvs = [];
+    failed = true;
   }
   const count = document.querySelector<HTMLElement>(`[data-count="${navScene}"]`);
   if (count) count.textContent = String(navConvs.length);
   list.innerHTML = '';
+  if (failed) {
+    list.innerHTML = errorStateHtml('会话列表加载失败', 'nav-convs');
+    return;
+  }
   if (navConvs.length === 0) {
-    list.innerHTML = '<li class="empty">暂无会话，点「新对话」开始</li>';
+    list.innerHTML = emptyStateHtml('暂无会话，点「新对话」开始');
     return;
   }
   for (const c of navConvs) {
@@ -889,7 +910,8 @@ async function openDocById(id: number): Promise<void> {
         setStatus('已打开（磁盘实时）：' + doc.filename);
         return;
       } catch {
-        // 句柄失效则回退，并在下方说明原因
+        // 这不是「取不到数据」，而是「磁盘那份不可用」——已有明确回退（读数据库快照）
+        // 且通过 doc-source 标签说清原因，所以不需要 error 态 + 重试。
         setDocSource(
           'snapshot',
           '数据库快照',
@@ -1095,6 +1117,21 @@ void startGate((user: SessionUser) => {
 
   void refreshDocsIndex();
   loadDefaultDoc();
+
+  // 「重试」按钮的事件委托：错误态里的重试按钮是 innerHTML 拼出来的，
+  // 重建一次就丢监听，所以统一在 document 上接。
+  document.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-retry]');
+    if (!btn) return;
+    e.preventDefault();
+    const target = btn.dataset.retry as RetryTarget | undefined;
+    if (target === 'history') void refreshHistory(($('global-search') as HTMLInputElement).value);
+    else if (target === 'search-index') {
+      // 索引可能半途建到一半就挂了，清掉重拉。
+      searchIndex = null;
+      void refreshHistory(($('global-search') as HTMLInputElement).value);
+    } else if (target === 'nav-convs') void refreshNavConvs();
+  });
 });
 
 /** 文档区工具栏的删除：二次确认 → DELETE /api/docs/:id → 回到默认文档。 */

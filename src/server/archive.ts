@@ -247,7 +247,15 @@ export async function archiveDoc(
   const doc = resolveDocRef(userId, ref);
   if (!doc) throw new HttpError(404, '文档不存在');
   const storage = getArchiveStorage(userId);
-  const prepared = await prepareArchiveMarkdown(userId, doc.content, storage);
+  // 三段失败点分开报：mermaid 渲染/上传、对象存储上传、落库。
+  // 前端靠 step 告诉用户重试哪一段，而不是只说一句「归档失败」。
+  let prepared;
+  try {
+    prepared = await prepareArchiveMarkdown(userId, doc.content, storage);
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(500, `生成分享内容失败：${(e as Error).message}`, 'render');
+  }
   const title = doc.title || doc.doc_key;
   const html = buildShareHtmlDoc(prepared.md, title);
   const sha = sha256Content(doc.content);
@@ -259,20 +267,30 @@ export async function archiveDoc(
 
   // 先传文件、后落库：上传失败不留半成品行（FR-15 验收）
   // shortcut: 落库失败时已上传的对象会孤立残留在存储里（无引用、不清扫），需要时再加对账任务
-  const mdUp = await storage.put(`${base}.md`, mdBuf, 'text/markdown; charset=utf-8');
-  const htmlUp = await storage.put(`${base}.html`, htmlBuf, 'text/html; charset=utf-8');
+  let mdUp, htmlUp;
+  try {
+    mdUp = await storage.put(`${base}.md`, mdBuf, 'text/markdown; charset=utf-8');
+    htmlUp = await storage.put(`${base}.html`, htmlBuf, 'text/html; charset=utf-8');
+  } catch (e) {
+    throw new HttpError(502, `上传产物到对象存储失败：${(e as Error).message}`, 'upload');
+  }
   const token = ensureDocArchiveToken(userId, doc.id);
-  const artifact = insertArtifact(userId, doc.doc_key, {
-    md: prepared.md,
-    mdUrl: mdUp.url,
-    htmlUrl: htmlUp.url,
-    mdKey: mdUp.key,
-    htmlKey: htmlUp.key,
-    mdSize: mdBuf.length,
-    htmlSize: htmlBuf.length,
-    sourceContentSha256: sha,
-    note: note ?? null,
-  });
+  let artifact;
+  try {
+    artifact = insertArtifact(userId, doc.doc_key, {
+      md: prepared.md,
+      mdUrl: mdUp.url,
+      htmlUrl: htmlUp.url,
+      mdKey: mdUp.key,
+      htmlKey: htmlUp.key,
+      mdSize: mdBuf.length,
+      htmlSize: htmlBuf.length,
+      sourceContentSha256: sha,
+      note: note ?? null,
+    });
+  } catch (e) {
+    throw new HttpError(500, `写入归档记录失败：${(e as Error).message}`, 'db');
+  }
   ensureArchivePath(userId, doc.doc_key);
   return {
     artifact,

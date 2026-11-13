@@ -1,4 +1,5 @@
 import { askConfirm, askText } from './dialog';
+import { agentChrome } from './agent-chrome';
 import { renderMarkdown } from '../core/markdown';
 import { renderMermaidBlocks } from '../core/mermaid';
 
@@ -42,16 +43,36 @@ export function initAgentChat(opts: {
   /** 子代理卡片状态（FR-13）：id → {task,status,result,error} */
   const subCards = new Map<string, { task: string; status: string; result?: string; error?: string }>();
 
-  // ─── 场景 Tab（主界面顶部）──────────────────────────
-  const setScene = (next: AgentScene): void => {
+  // ─── 结果态 chrome 的显隐 ─────────────────────────
+  // 空状态（没有会话）时，「停止」「补充检索」和右侧可观测面板都没有对象可作用：
+  // 留着就是能点、能 Tab 到、点了什么都不发生的假控件。
+  const applyResultChrome = (): void => {
+    const c = agentChrome(convId != null, scene);
+    document.getElementById('agent-stop')!.hidden = c.stopHidden;
+    document.getElementById('agent-retrieve')!.hidden = c.retrieveHidden;
+    const obs = document.querySelector<HTMLElement>('.agent-page .agent-obs')!;
+    obs.hidden = c.obsHidden;
+    // 隐藏 aside 后 grid 仍会留下 260px 空列，用类名切回单列。
+    document
+      .querySelector<HTMLElement>('.agent-page .agent-body')!
+      .classList.toggle('no-obs', c.obsHidden);
+  };
+
+  // ─── 场景 Tab（主界面顶部）──────────────────────
+  /// 只切 Tab 的高亮与场景变量，不碰会话。
+  const selectSceneTab = (next: AgentScene): void => {
     scene = next;
     document.querySelectorAll('.agent-tabs button').forEach((b) => {
       const on = (b as HTMLElement).dataset.scene === next;
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', String(on));
     });
-    document.getElementById('agent-retrieve')!.hidden = scene !== 'writer';
+  };
+
+  const setScene = (next: AgentScene): void => {
+    selectSceneTab(next);
     convId = null;
+    applyResultChrome();
     void refresh();
     opts.onConvsChanged?.();
   };
@@ -193,12 +214,14 @@ export function initAgentChat(opts: {
   // ─── 会话加载 / 新建 ───────────────────────────────
   const refresh = async (): Promise<void> => {
     bindPage();
+    applyResultChrome();
     subCards.clear();
     renderSubCards();
     if (convId == null) {
       document.getElementById('agent-msgs')!.innerHTML =
         '<div class="agent-empty">从左侧选择会话，或点「新对话」开始</div>';
-      renderObs();
+      // 空态不留可观测面板：它只会显示「模型 - / 无命中 / 无工具」的空壳。
+      document.getElementById('agent-obs')!.innerHTML = '';
       return;
     }
     await loadConv();
@@ -213,6 +236,7 @@ export function initAgentChat(opts: {
     const j = (await res.json()) as { id: number; error?: string };
     if (!res.ok) return opts.onStatus(j.error || '失败', true);
     convId = j.id;
+    applyResultChrome();
     await refresh();
     opts.onConvsChanged?.();
   };
@@ -492,10 +516,10 @@ export function initAgentChat(opts: {
     setScene,
     // Sider 会话导航回调：打开指定会话
     openConv: (id: number, s: AgentScene) => {
-      scene = s;
+      // 不能借用 setScene：它把 convId 清空，打开会话会被自己关掉（旧代码靠再赋一次值绕过）。
+      selectSceneTab(s);
       convId = id;
-      setScene(s);
-      convId = id;
+      applyResultChrome();
       void refresh();
     },
     newConv,

@@ -2,9 +2,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export class HttpError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** 失败落在哪一步（归档链路上用于告诉前端重试哪一段），没有分段概念时为空。 */
+  step?: string;
+  constructor(status: number, message: string, step?: string) {
     super(message);
     this.status = status;
+    this.step = step;
     this.name = 'HttpError';
   }
 }

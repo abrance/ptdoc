@@ -242,7 +242,10 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
 
       return next();
     } catch (e) {
-      if (e instanceof HttpError) return sendJson(res, e.status, { error: e.message });
+      // step 告诉前端重试哪一段（render / upload / db），前端靠它在重试按钮旁边说清楚。
+      if (e instanceof HttpError) {
+        return sendJson(res, e.status, e.step ? { error: e.message, step: e.step } : { error: e.message });
+      }
       sendJson(res, 500, { error: (e as Error).message });
     }
   };
