@@ -112,12 +112,34 @@ function fmtBytes(n: number | null): string {
   return n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B';
 }
 
-async function readJson<T>(res: Response): Promise<T & { error?: string }> {
+async function readJson<T>(res: Response): Promise<T & { error?: string; step?: string }> {
   try {
-    return (await res.json()) as T & { error?: string };
+    return (await res.json()) as T & { error?: string; step?: string };
   } catch {
-    return {} as T & { error?: string };
+    return {} as T & { error?: string; step?: string };
   }
+}
+
+/** 归档失败落哪一步 → 给用户看的中文名。服务端在 error 响应里带 step。 */
+const STEP_LABEL: Record<string, string> = {
+  render: 'mermaid 图表渲染',
+  upload: '对象存储上传',
+  db: '归档记录写库',
+};
+
+function stepLabel(step?: string): string {
+  if (!step) return '';
+  return STEP_LABEL[step] ?? step;
+}
+
+/** 把 {error, step} 拼成一条能直接放进提示的文案：先阶段后原因，缺什么都退回状态码。 */
+export function archiveErrorText(
+  data: { error?: string; step?: string },
+  status?: number,
+): string {
+  const at = stepLabel(data.step);
+  const msg = data.error || (status ? 'HTTP ' + status : '');
+  return at ? `${at} 阶段：${msg}` : msg;
 }
 
 async function copyText(text: string): Promise<void> {
@@ -276,6 +298,15 @@ async function runArchive(ref: string): Promise<void> {
     confirmLabel: first ? '归档' : '重新归档',
   });
   if (note === null) return;
+  await archiveWithRetry(ref, note);
+}
+
+/** 真正发归档请求；失败时给一条带「重试」的提示，并说明断在哪一步。
+ *
+ * 以前只剩一句「归档失败：...」飘走，用户唯一能做的就是再点一次同一个按钮，
+ * 而且不知道失败是图渲染、上传还是写库——重试前无从判断。
+ */
+async function archiveWithRetry(ref: string, note: string): Promise<void> {
   setBusy(true);
   try {
     const res = await fetch(`/api/docs/${encodeURIComponent(ref)}/archive`, {
@@ -291,7 +322,7 @@ async function runArchive(ref: string): Promise<void> {
       unchanged?: boolean;
       image_warnings?: string[];
     }>(res);
-    if (!res.ok) throw new Error((data.error as string) || 'HTTP ' + res.status);
+    if (!res.ok) throw new Error(archiveErrorText(data, res.status));
     const warnings = data.image_warnings ?? [];
     applyStatus({ stale: false, version: Number(data.version) || toolbarStatus.version + 1, token: data.token ?? null });
     showResultLink(data.public_url, warnings);
@@ -302,7 +333,11 @@ async function runArchive(ref: string): Promise<void> {
     );
     void refreshArchiveList();
   } catch (e) {
-    showToast('归档失败：' + (e as Error).message, 'error');
+    // 重试按钮直接再跑这一遍（note 沿用，不用重新填备注）。
+    showToast('归档失败：' + (e as Error).message, 'error', {
+      label: '重试',
+      onClick: () => void archiveWithRetry(ref, note),
+    });
   } finally {
     setBusy(false);
   }

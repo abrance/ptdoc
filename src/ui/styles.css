@@ -2449,6 +2449,20 @@ body.toc-on .preview-pane {
   border-left-color: var(--success);
 }
 
+/* 带操作的提示：文字在上、按钮在下，按钮可点（容器本身 pointer-events: none）。 */
+.toast.has-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.toast-action {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 .toast.out {
   opacity: 0;
   transform: translateY(-4px);

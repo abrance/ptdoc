@@ -15,6 +15,7 @@ import { initOverlayManager, closeTopOverlay } from './overlay';
 import { initScrollSync } from './scroll-sync';
 import { initVersionsDrawer } from './versions';
 import { showToast } from './toast';
+import { paintStatus } from './status-line';
 import {
   initArchivePage,
   initArchiveToolbar,
@@ -72,10 +73,12 @@ function scheduleRender(): void {
   renderTimer = window.setTimeout(render, 200);
 }
 function setStatus(msg: string, isError = false): void {
-  statusEl.textContent = msg;
-  statusEl.className = 'status' + (isError ? ' error' : '');
-  // 错误另外弹一个会自己消失的提示：状态栏那行会被下一次操作覆盖，容易直接错过
-  if (isError && msg) showToast(msg, 'error');
+  // 错误只走 toast 这一条通路：状态栏写「操作失败」标记，具体原因在 toast 里只说一次。
+  // 以前两处都写同一句，屏幕上出现两遍；分工与理由见 status-line.ts。
+  const p = paintStatus(msg, isError);
+  statusEl.textContent = p.text;
+  statusEl.className = 'status' + (p.error ? ' error' : '');
+  if (p.toast) showToast(p.toast, 'error');
 }
 
 // ─── 保存状态（状态栏右侧，和瞬时提示分开）────────────────
