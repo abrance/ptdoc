@@ -48,19 +48,59 @@ function formHtml(title: string, extraLink: string, submitLabel: string): string
     </div>`;
 }
 
+/** 门禁的两个往返：先问是否已初始化，再问我是谁。
+ *  任何一步 reject（断网、后端 500、返回体不是 JSON）都由 startGate 兜住，不许静默冒泡。 */
+async function resolveGate(): Promise<SessionUser | 'setup' | 'login'> {
+  const res = await fetch('/api/setup/status');
+  if (!res.ok) throw new Error('初始化状态查询失败：' + (await readError(res)));
+  const st = (await res.json()) as { initialized: boolean };
+  if (!st.initialized) return 'setup';
+  const me = await fetch('/api/auth/me');
+  if (me.ok) return (await me.json()) as SessionUser;
+  return 'login';
+}
+
+const esc = (s: string): string =>
+  s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] as string);
+
+/** 门禁自己挂了，也必须给出一张能重试的卡：
+ *  以前 `void startGate(...)` 无 catch，fetch 抛错就 showLogin/showSetup 都不调，
+ *  #app 永远 hidden → 用户看到纯白页，连登录框都没有（比首屏闪一下更糟）。 */
+function showGateError(onReady: (user: SessionUser) => void, message: string): void {
+  mountGate(`
+    <div class="auth-card">
+      <h1>无法连接服务</h1>
+      <p class="auth-hint">${esc(message)}</p>
+      <p class="auth-sub">登录态未知，工作区保持锁定。确认后端在运行后重试。</p>
+      <button type="button" id="gate-retry">重试</button>
+    </div>`);
+  const retry = document.getElementById('gate-retry') as HTMLButtonElement | null;
+  retry?.addEventListener('click', () => {
+    retry.disabled = true;
+    retry.textContent = '重试中…';
+    void startGate(onReady);
+  });
+}
+
 export async function startGate(onReady: (user: SessionUser) => void): Promise<void> {
-  const st = await fetch('/api/setup/status').then((r) => r.json() as Promise<{ initialized: boolean }>);
-  if (!st.initialized) {
+  let state: SessionUser | 'setup' | 'login';
+  try {
+    state = await resolveGate();
+  } catch (err) {
+    showGateError(onReady, (err as Error).message || String(err));
+    return;
+  }
+  if (state === 'setup') {
     showSetup(onReady);
     return;
   }
-  const me = await fetch('/api/auth/me');
-  if (me.ok) {
-    hideGate();
-    onReady((await me.json()) as SessionUser);
+  if (state === 'login') {
+    showLogin(onReady);
     return;
   }
-  showLogin(onReady);
+  // onReady 放在 try 外：登录已成功，工作区初始化自己出错时不该被误画成门禁错误卡。
+  hideGate();
+  onReady(state);
 }
 
 function showSetup(onReady: (user: SessionUser) => void): void {

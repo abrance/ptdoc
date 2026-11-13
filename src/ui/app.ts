@@ -1135,6 +1135,9 @@ void startGate((user: SessionUser) => {
       void refreshHistory(($('global-search') as HTMLInputElement).value);
     } else if (target === 'nav-convs') void refreshNavConvs();
   });
+}).catch((err) => {
+  // 工作区初始化自己出错时不能静默吞：至少让用户看到断在哪，而不是白屏。
+  setStatus('工作区初始化失败：' + ((err as Error).message || String(err)), true);
 });
 
 /** 文档区工具栏的删除：二次确认 → DELETE /api/docs/:id → 回到默认文档。 */
