@@ -512,6 +512,10 @@ export function initAgentChat(opts: {
     opts.onDraftApplied?.(mode, mode === 'replace-current' ? opts.getCurrentDocId() : null);
   };
 
+  // 首次进页就要跑一遍：以前只靠 setScene/openConv/refresh 触发，从侧栏点「智能体」
+  // 进来时这三个都不走，于是「停止」带着 DOM 默认的可见状态留在屏幕上，连 onclick 都没挂。
+  void refresh();
+
   return {
     setScene,
     // Sider 会话导航回调：打开指定会话

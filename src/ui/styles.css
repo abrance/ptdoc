@@ -96,6 +96,13 @@
   box-sizing: border-box;
 }
 
+/* `hidden` 属性必须真的藏住。UA 的 [hidden]{display:none} 会被任何
+ * `display:flex/grid` 选择器盖掉（.agent-draft、.archive-result、.admin-ext…），
+ * 结果元素既可见又能被 Tab 到——「点了什么都不发生的假控件」正是这么来的。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
