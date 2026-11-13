@@ -1011,6 +1011,11 @@ body.sidebar-collapsed .sidebar {
   min-height: 0;
 }
 
+/* 没有会话时不渲染可观测面板，右列一并收起（否则留 260px 空白）。 */
+.agent-page .agent-body.no-obs {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .agent-page .agent-main {
   display: flex;
   flex-direction: column;
