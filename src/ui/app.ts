@@ -17,6 +17,7 @@ import { initVersionsDrawer } from './versions';
 import { showToast } from './toast';
 import { paintStatus } from './status-line';
 import { emptyStateHtml, errorStateHtml, type RetryTarget } from './list-state';
+import { applyWorkspaceGate } from './auth-chrome';
 import {
   initArchivePage,
   initArchiveToolbar,
@@ -1007,6 +1008,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 void startGate((user: SessionUser) => {
+  // 登录成功才打开工作区；在此之前 index.html 静态带着 inert+hidden（P0-2/P2-9）。
+  applyWorkspaceGate([$('app'), $('skip-link')], true);
   setHandleUser(user.id);
   searchIndex = null;
   searchDocs = [];

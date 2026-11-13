@@ -24,6 +24,8 @@ function mountGate(html: string): HTMLElement {
   el.className = 'auth-gate';
   el.innerHTML = html;
   el.hidden = false;
+  // 工作区已 inert，焦点只能在卡片里；不主动交出焦点的话，首次 Tab 可能落到浏览器地址栏。
+  (el.querySelector('input, button') as HTMLElement | null)?.focus();
   return el;
 }
 
