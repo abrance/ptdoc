@@ -15,6 +15,7 @@ import {
   type SpaceTreeData,
   type SpaceTreeNode,
 } from './space-tree';
+import { emptyStateBlockHtml } from './list-state';
 
 // ─── 侧栏空间树（space → 目录 → 文档）──────────────────────
 // 服务端 /api/spaces/:id/tree 一次返回整棵树并已排好序；这里只按 parent 归位、渲染、拖拽。
@@ -169,14 +170,13 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     if (!tree) {
       treeEl.innerHTML =
         spaces.length === 0
-          ? '<div class="tree-empty">还没有空间</div>'
+          ? emptyStateBlockHtml('还没有空间，点上方「＋」新建一个', 'inline')
           : '<div class="tree-empty">加载中…</div>';
       return;
     }
     const nodes = buildSpaceTree(tree);
     if (nodes.length === 0) {
-      treeEl.innerHTML =
-        '<div class="tree-empty">这个空间还没有文档。<br />点「新建」创建，或把文档拖进来。</div>';
+      treeEl.innerHTML = emptyStateBlockHtml('这个空间还没有文档。点「新建」创建，或把文档拖进来。', 'inline');
       return;
     }
     const ul = document.createElement('ul');
@@ -260,7 +260,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       (d) => d.title.toLowerCase().includes(needle) || d.doc_key.toLowerCase().includes(needle),
     );
     if (hits.length === 0) {
-      treeEl.innerHTML = '<div class="tree-empty">没有匹配的文档</div>';
+      treeEl.innerHTML = emptyStateBlockHtml('没有匹配的文档', 'inline');
       return;
     }
     const ul = document.createElement('ul');

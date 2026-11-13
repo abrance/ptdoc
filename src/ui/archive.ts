@@ -4,6 +4,7 @@
 
 import { askConfirm, askNote } from './dialog.ts';
 import { showToast } from './toast.ts';
+import { emptyStateHtml } from './list-state.ts';
 
 export interface ArchiveStatus {
   stale: boolean;
@@ -444,9 +445,12 @@ export async function refreshArchiveList(q = ''): Promise<void> {
     list.dataset.rendered = '1';
     if (items.length === 0) {
       list.innerHTML = q
-        ? `<li class="ar-empty">没有匹配「${esc(q)}」的归档。</li>`
-        : `<li class="ar-empty">还没有归档产物。打开任意文档点「归档」即可。
-             <button data-op="docs" type="button">打开文档列表</button></li>`;
+        ? emptyStateHtml(`没有匹配「${q}」的归档。`, 'hero')
+        : emptyStateHtml(
+            '还没有归档产物。打开任意文档点「归档」即可。',
+            'hero',
+            '<button class="empty-action" data-op="docs" type="button">打开文档列表</button>',
+          );
       return;
     }
     list.innerHTML = items

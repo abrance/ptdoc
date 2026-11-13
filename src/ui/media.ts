@@ -1,5 +1,6 @@
 // ─── 媒体库面板（抽屉：缩略图网格 / 复制 / 插入 / 删除）────────
 import { askConfirm } from './dialog';
+import { emptyStateBlockHtml } from './list-state';
 
 interface MediaRow {
   id: number;
@@ -87,7 +88,10 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
       const rows = (await res.json()) as MediaRow[];
       grid.innerHTML = '';
       if (rows.length === 0) {
-        grid.innerHTML = '<div class="media-empty">暂无图片，去上传一张吧</div>';
+        grid.innerHTML = emptyStateBlockHtml(
+          q || source ? '没有匹配的图片，换个关键词或来源试试' : '暂无图片，用上方「上传」加一张',
+          'panel',
+        );
         return;
       }
       rows.forEach((m) => {
