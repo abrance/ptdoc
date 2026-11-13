@@ -2264,6 +2264,25 @@ body.toc-on .preview-pane {
   text-align: center;
 }
 
+/* 「取不到」不是「真的空」：错误态用独立类名 + 可点的重试。
+   两者共用同一套灰字会让用户分不出「没有记录」和「请求挂了」。 */
+.history-list .load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--danger);
+  text-align: center;
+}
+
+.history-list .load-retry {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
