@@ -27,6 +27,8 @@ import {
   updateShareHtmlUrl,
   renameDoc,
   deleteShare,
+  listAllArtifactKeys,
+  markArtifactDeleted,
   resolveDocRef,
 } from './db.ts';
 
@@ -371,5 +373,24 @@ test('改 content 后 stale 为 true；只改 updated_at 或 doc_key 时为 fals
   raw.close();
   initDB(file2);
   assert.equal(listArchive(u3.id).entries[0].stale, false);
+  closeDB();
+});
+
+test('listAllArtifactKeys 把 deleted 行也算已引用（孤儿对账不能误删）', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('orphan', 'hash', 'member');
+  upsertDoc(u.id, 'a.md', 'A', 'a.md', '# a');
+  const s = insertShare(u.id, 'a.md', '# a', [], 'https://q/keep.md', 'https://q/keep.html');
+  // md_key/html_key 由归档流程写入，这里直接造两条 key 验证对账口径
+  const raw0 = new DatabaseSync(file);
+  raw0.prepare('UPDATE shares SET md_key=?, html_key=? WHERE id=?').run('archive/a.md/v1-aaaa.md', 'archive/a.md/v1-aaaa.html', s.id);
+  raw0.close();
+
+  assert.deepEqual([...listAllArtifactKeys(u.id)].sort(), ['archive/a.md/v1-aaaa.html', 'archive/a.md/v1-aaaa.md']);
+
+  // 标记删除后 key 仍在集合里：记录虽删，对象若还留在桶里也不能当孤儿重复清
+  markArtifactDeleted(u.id, s.id);
+  assert.equal(listAllArtifactKeys(u.id).size, 2, 'deleted 行的 key 仍算已引用');
   closeDB();
 });

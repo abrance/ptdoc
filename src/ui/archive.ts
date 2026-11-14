@@ -610,10 +610,43 @@ async function syncArchive(docId: number): Promise<void> {
   }
 }
 
+/** 删文档只删记录、不动对象（语义不变），所以对象要靠这里对账清。先列后删，两次确认。 */
+async function cleanOrphans(): Promise<void> {
+  type OrphanReport = { scanned: number; referenced: number; orphans: string[]; deleted?: string[]; warnings?: { key: string; reason: string }[] };
+  try {
+    const res = await fetch('/api/archive/orphans');
+    const data = await readJson<OrphanReport & { error?: string }>(res);
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+    if (data.orphans.length === 0) {
+      showToast(`没有孤儿对象（桶内 ${data.scanned} 个，全部被引用）`, 'success');
+      return;
+    }
+    const ok = await askConfirm(
+      `桶内共 ${data.scanned} 个对象，${data.referenced} 个仍被归档记录引用。\n` +
+        `以下 ${data.orphans.length} 个已无任何记录引用，删除后无法恢复：\n\n` +
+        data.orphans.slice(0, 10).join('\n') +
+        (data.orphans.length > 10 ? `\n… 还有 ${data.orphans.length - 10} 个` : ''),
+      { title: '删除孤儿对象？', confirmLabel: '删除 ' + data.orphans.length + ' 个', danger: true },
+    );
+    if (!ok) return;
+    const done = await fetch('/api/archive/orphans?apply=1');
+    const rep = await readJson<OrphanReport & { error?: string }>(done);
+    if (!done.ok) throw new Error(rep.error || 'HTTP ' + done.status);
+    const failed = rep.warnings ?? [];
+    showToast(
+      `已删除 ${rep.deleted?.length ?? 0} 个孤儿对象` + (failed.length ? `，${failed.length} 个失败` : ''),
+      failed.length ? 'error' : 'success',
+    );
+  } catch (e) {
+    showToast('孤儿清理失败：' + (e as Error).message, 'error');
+  }
+}
+
 export function initArchivePage(opts: PageOpts): void {
   pageOpts = opts;
   const list = $('archive-list');
   const input = $('archive-search') as HTMLInputElement;
+  $('archive-orphans').addEventListener('click', () => void cleanOrphans());
   input.addEventListener('input', () => {
     clearTimeout(searchTimer);
     searchTimer = window.setTimeout(() => void refreshArchiveList(input.value.trim()), 300);

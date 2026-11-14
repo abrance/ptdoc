@@ -102,6 +102,27 @@ export function deleteFromQiniu(config: QiniuConfig, key: string): Promise<void>
 }
 
 /**
+ * 列出 bucket 里指定前缀的对象 key（FR-34 孤儿产物清理用）。
+ * 只取 key：清理要对账的是「桶里有、库中无」，不需要 size/mtime。
+ */
+export function listQiniuKeys(config: QiniuConfig, prefix: string): Promise<string[]> {
+  const mac = new qiniu.auth.digest.Mac(config.accessKey, config.secretKey);
+  const conf = new qiniu.conf.Config({ zone: ZONES[config.zone] });
+  const bucketManager = new qiniu.rs.BucketManager(mac, conf);
+  const keys: string[] = [];
+  const page = (marker?: string): Promise<string[]> =>
+    new Promise((resolve, reject) => {
+      bucketManager.listPrefix(config.bucket, { prefix, limit: 1000, marker }, (err, body) => {
+        if (err) return reject(err);
+        for (const it of body.items ?? []) keys.push(it.key);
+        if (body.marker) return page(body.marker).then(resolve, reject);
+        resolve(keys);
+      });
+    });
+  return page();
+}
+
+/**
  * 真上传一个探针对象再删掉。stat 探测在 region 选错时同样返回 612（对象不存在），
  * 会误判为连通，直到首次归档才 500；写一次才真正验证 bucket / region / 写权限。
  */
