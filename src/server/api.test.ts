@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
@@ -10,6 +10,7 @@ import { loadServerEnv } from './env.ts';
 import { apiMiddleware } from './api.ts';
 import { archiveApiMiddleware } from './archive-api.ts';
 import { hasBareDocKeySlash } from './http.ts';
+import { extractZipToDir } from './zip-util.ts';
 
 // FR-25：GET /api/docs/ops/a.md/archive-status 曾落到 GET /api/docs 列表路由，返回 200 + 文档列表。
 
@@ -121,4 +122,37 @@ test('FR-25 尾段白名单：api.ts / archive-api.ts 的 12 种合法子路由�
   assert.equal(hasBareDocKeySlash('/api/docs'), false);
   // 带 query 的裸斜杠同样判非法
   assert.equal(hasBareDocKeySlash('/api/docs/ops/a.md/archive-status?x=1'), true);
+});
+
+test('FR-29 GET /api/docs/export.zip 返回 zip，解压后 md 与库内内容一致', async () => {
+  const { user, token } = boot();
+  upsertDoc(user.id, 'dir/a.md', 'A', 'a.md', '# A\n正文\n');
+  upsertDoc(user.id, 'b.md', 'B', 'b.md', '无标题正文\n');
+  const req: any = Readable.from([]);
+  req.method = 'GET';
+  req.url = '/api/docs/export.zip';
+  req.headers = { cookie: `ptdoc_session=${token}` };
+  let captured: Buffer | undefined;
+  let status = 200;
+  const headers: Record<string, string> = {};
+  const res: any = {
+    get statusCode() { return status; },
+    set statusCode(v: number) { status = v; },
+    setHeader: (k: string, v: any) => { headers[k.toLowerCase()] = v; },
+    end: (c?: any) => { captured = Buffer.from(c); return res; },
+  };
+  let nexted = false;
+  await (apiMiddleware() as any)(req, res, () => { nexted = true; });
+  assert.equal(nexted, false, 'export.zip 应由 api 处理');
+  assert.equal(status, 200);
+  assert.equal(headers['content-type'], 'application/zip');
+  assert.match(headers['content-disposition'], /ptdoc-export\.zip/);
+  const dir = mkdtempSync(join(tmpdir(), 'ptdoc-unzip-'));
+  const files = extractZipToDir(captured!, dir);
+  assert.ok(files.includes('dir/a.md'), '子目录路径应保留');
+  assert.ok(files.includes('b.md'));
+  assert.ok(files.includes('INDEX.md'));
+  assert.ok(files.includes('archive-urls.csv'));
+  assert.equal(readFileSync(join(dir, 'dir/a.md'), 'utf8'), '# A\n正文\n');
+  closeDB();
 });
