@@ -13,7 +13,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { decryptSecret } from './storage.ts';
-import { getDoc, getLlmProfile, getQdrantProfile, listAllDocs } from './db.ts';
+import { getDoc, getLlmProfile, getQdrantProfile, listAllDocs, searchDocs } from './db.ts';
 import { retrieveHits, type RetrievedHit } from './qdrant-retriever.ts';
 import { loadPluginTools, mcpServerConfigs, readSkillInstructions } from './extension-store.ts';
 
@@ -53,6 +53,8 @@ export interface ChatRunResult {
   thinking?: string;
   /** 流式过程中发生的错误（未中断循环时随结果返回，供 API 层标记失败 turn） */
   errorText?: string;
+  /** FR-33：本轮 qa 走了全文检索兜底（未配置向量库）时为 true，API 层据此在回答前加提示 */
+  retrievalFallback?: boolean;
 }
 
 export type ChatRunner = (input: ChatRunInput) => AsyncGenerator<StreamEvent, ChatRunResult>;
@@ -72,11 +74,14 @@ export function extractDraft(text: string): string | undefined {
   return m ? m[1].trim() : undefined;
 }
 
-function qaInstructions(skills: string): string {
+function qaInstructions(skills: string, fullTextFallback = false): string {
   return [
-    '你是 PTDoc 知识库问答助手。优先用 search_knowledge 检索后再回答。',
+    '你是 PTDoc 知识库问答助手。先用 search_knowledge 检索用户工作区文档后再回答；必要时用 list_workspace_docs / read_workspace_doc 直接读全文。',
     '引用检索片段，不要编造来源。未命中时明确说明。',
     '回答正文中在引用检索片段处标注角标 [1] [2]（编号对应检索返回顺序），便于溯源。',
+    fullTextFallback
+      ? '未配置向量库，已用本地全文检索（结果偏保守）；不要提及向量库/embedding 等技术细节。'
+      : '',
     '需要多角度并行检索时，可用 subagent_spawn 派发子任务（上限 3），完成后 subagent_wait_all 汇总结果再回答。',
     skills,
   ]
@@ -107,22 +112,40 @@ async function executeTool(
   const t0 = Date.now();
   try {
     if (name === 'search_knowledge') {
+      const query = String(args.query || '');
       const profile = getQdrantProfile(userId);
-      if (!profile) throw new Error('请先在设置中填写 Qdrant URL 与 collection');
+      // FR-33：未配置 Qdrant 时退化为本地全文检索（searchDocs），不再直接报错
+      if (!profile) {
+        const local = searchDocsToHits(userId, query);
+        hits.push(...local);
+        spans.push({ name, ms: Date.now() - t0, ok: true, detail: 'fallback:' + local.length });
+        return JSON.stringify(local);
+      }
       const apiKey = profile.api_key_enc ? decryptSecret(profile.api_key_enc) : undefined;
-      const found = await retrieveHits(
-        {
-          url: profile.url,
-          apiKey,
-          collection: profile.collection,
-          vectorName: profile.vector_name || undefined,
-          topK: profile.top_k,
-        },
-        String(args.query || ''),
-      );
-      hits.push(...found);
-      spans.push({ name, ms: Date.now() - t0, ok: true, detail: String(found.length) });
-      return JSON.stringify(found);
+      let found: RetrievedHit[] = [];
+      try {
+        found = await retrieveHits(
+          {
+            url: profile.url,
+            apiKey,
+            collection: profile.collection,
+            vectorName: profile.vector_name || undefined,
+            topK: profile.top_k,
+          },
+          query,
+        );
+      } catch (e) {
+        // Qdrant 配了但不可用：不硬失败，退回全文检索，保证仍能回答
+        const local = searchDocsToHits(userId, query);
+        hits.push(...local);
+        spans.push({ name, ms: Date.now() - t0, ok: true, detail: 'qdrant-error-fallback:' + local.length });
+        return JSON.stringify(local);
+      }
+      // 两路合并去重：向量结果在前，全文命中里补充向量没覆盖到的文档
+      const merged = mergeHits(found, searchDocsToHits(userId, query));
+      hits.push(...merged);
+      spans.push({ name, ms: Date.now() - t0, ok: true, detail: String(merged.length) });
+      return JSON.stringify(merged);
     }
     if (name === 'list_workspace_docs') {
       const docs = listAllDocs(userId).map((d) => ({ doc_key: d.doc_key, title: d.title, id: d.id }));
@@ -130,8 +153,19 @@ async function executeTool(
       return JSON.stringify(docs);
     }
     if (name === 'read_workspace_doc') {
-      const id = Number(args.doc_id);
-      const doc = Number.isFinite(id) ? getDoc(userId, id) : undefined;
+      // 既接受数字 doc_id，也接受 doc_key（模型从 list_workspace_docs 里拿到的常是 key）
+      const ref = args.doc_id;
+      let doc: ReturnType<typeof getDoc> = undefined;
+      if (typeof ref === 'number' && Number.isFinite(ref)) doc = getDoc(userId, ref);
+      else if (typeof ref === 'string' && ref.trim()) {
+        const s = ref.trim();
+        doc = /^\d+$/.test(s) ? getDoc(userId, Number(s)) : undefined;
+        if (!doc) {
+          const all = listAllDocs(userId);
+          const hit = all.find((d) => d.doc_key === s || d.filename === s);
+          if (hit) doc = getDoc(userId, hit.id);
+        }
+      }
       spans.push({ name, ms: Date.now() - t0, ok: !!doc });
       if (!doc) return '文档不存在';
       return JSON.stringify({ doc_key: doc.doc_key, title: doc.title, content: doc.content });
@@ -144,19 +178,60 @@ async function executeTool(
   }
 }
 
+/** FR-33：本地全文检索结果 → RetrievedHit（与 Qdrant 结果同形，供统一引用角标）。 */
+function searchDocsToHits(userId: number, query: string, limit = 8): RetrievedHit[] {
+  const q = query.trim();
+  if (!q) return [];
+  return searchDocs(userId, q, limit).map((d) => ({
+    id: String(d.id),
+    title: d.title || d.doc_key,
+    snippet: buildSnippet(userId, d.id, q),
+    score: 0,
+    source: d.doc_key,
+    doc_key: d.doc_key,
+  }));
+}
+
+/** 从片段命中的关键词附近截一段做摘要（searchDocs 只回列表，不带 content）。 */
+function buildSnippet(userId: number, docId: number, q: string, span = 120): string {
+  const doc = getDoc(userId, docId);
+  if (!doc) return '';
+  const i = doc.content.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return doc.content.slice(0, span).trim();
+  const start = Math.max(0, i - span / 2);
+  return doc.content.slice(start, start + span).trim();
+}
+
+/**
+ * 合并两路检索结果去重。
+ * - 向量 chunks 全部保留（同一篇文档的多 chunk 合法）；
+ * - 本地整篇命中若 doc_key 已出现在向量结果里，则剔除（向量已覆盖该篇）；
+ * - 两边都没有 doc_key 时回退按 id 去重，避免重复引用。
+ */
+function mergeHits(a: RetrievedHit[], b: RetrievedHit[]): RetrievedHit[] {
+  const seenIds = new Set<string>();
+  const vecDocKeys = new Set<string>();
+  const out: RetrievedHit[] = [];
+  for (const h of a) {
+    const idKey = 'id:' + h.id;
+    if (seenIds.has(idKey)) continue;
+    seenIds.add(idKey);
+    if (h.doc_key) vecDocKeys.add(h.doc_key);
+    out.push(h);
+  }
+  for (const h of b) {
+    if (h.doc_key && vecDocKeys.has(h.doc_key)) continue; // 向量已覆盖整篇，剔除本地整篇命中
+    if (seenIds.has('id:' + h.id)) continue; // 无 doc_key 或真实重复时按 id 兜底
+    seenIds.add('id:' + h.id);
+    out.push(h);
+  }
+  return out;
+}
+
 type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 
-/** 场景工具定义（TypeBox schema，由 pi-ai 转换成各 provider 的 wire 格式） */
-function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
-  if (scene === 'qa') {
-    return [
-      {
-        name: 'search_knowledge',
-        description: '在远程 Qdrant 知识库中检索相关文档片段',
-        parameters: Type.Object({ query: Type.String({ description: '检索查询词' }) }),
-      },
-    ];
-  }
+/** 只读工作区工具（writer 与 qa 共用，FR-33 起 qa 也注册） */
+function workspaceReadTools(): PiTool[] {
   return [
     {
       name: 'list_workspace_docs',
@@ -165,10 +240,25 @@ function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
     },
     {
       name: 'read_workspace_doc',
-      description: '读取一篇工作区文档全文',
-      parameters: Type.Object({ doc_id: Type.Number({ description: '文档 id' }) }),
+      description: '读取一篇工作区文档全文（doc_id 传文档 id 或 doc_key 均可）',
+      parameters: Type.Object({ doc_id: Type.String({ description: '文档 id 或 doc_key' }) }),
     },
   ];
+}
+
+/** 场景工具定义（TypeBox schema，由 pi-ai 转换成各 provider 的 wire 格式） */
+function sceneTools(scene: 'qa' | 'writer'): PiTool[] {
+  if (scene === 'qa') {
+    return [
+      {
+        name: 'search_knowledge',
+        description: '检索用户工作区文档片段（配了 Qdrant 走向量，未配走本地全文检索）',
+        parameters: Type.Object({ query: Type.String({ description: '检索查询词' }) }),
+      },
+      ...workspaceReadTools(),
+    ];
+  }
+  return workspaceReadTools();
 }
 
 /** 子代理工具 = 场景只读工具（需求 FR-13：无 subagent_*，无写权限） */
@@ -347,6 +437,8 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
   }
   const { models, model, thinkingLevel } = built;
   const skills = readSkillInstructions();
+  // FR-33：qa 场景没配向量库 → search_knowledge 走本地全文检索兜底，回答后要带提示
+  const retrievalFallback = input.scene === 'qa' && !getQdrantProfile(input.userId);
   let currentDoc = '';
   if (input.docId) {
     const d = getDoc(input.userId, input.docId);
@@ -354,7 +446,7 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
   }
   const context: Context = {
     systemPrompt:
-      input.scene === 'qa' ? qaInstructions(skills) : writerInstructions(skills, currentDoc),
+      input.scene === 'qa' ? qaInstructions(skills, retrievalFallback) : writerInstructions(skills, currentDoc),
     messages: toPiMessages(input),
     tools: [
       ...sceneTools(input.scene),
@@ -579,7 +671,7 @@ async function* defaultRunner(input: ChatRunInput): AsyncGenerator<StreamEvent, 
   }
   const draft = input.scene === 'writer' ? extractDraft(text) : undefined;
   if (draft) yield { type: 'data-draft', data: { content: draft } };
-  return { text, draft, thinking, hits, spans, model: model.id, inputTokens, outputTokens, ...(lastError ? { errorText: lastError } : {}) };
+  return { text, draft, thinking, hits, spans, model: model.id, inputTokens, outputTokens, ...(lastError ? { errorText: lastError } : {}), ...(retrievalFallback ? { retrievalFallback: true } : {}) };
 }
 
 export async function* runChat(input: ChatRunInput): AsyncGenerator<StreamEvent, ChatRunResult> {

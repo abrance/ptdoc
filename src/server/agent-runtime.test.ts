@@ -311,12 +311,15 @@ test('子代理：spawn→并行检索→wait_all→汇总 全链路（FR-13）'
     for (const sr of subReqs) {
       assert.ok(!sr.tools?.some((t: any) => t.function?.name?.startsWith('subagent_')), '子代理工具面不应含 subagent_*');
     }
-    // 子代理确实调用了 search_knowledge（工具循环生效）：子代理首轮请求 = 工具面仅 search_knowledge 且无 tool/assistant 历史
+    // 子代理确实调用了 search_knowledge（工具循环生效）：子代理首轮请求 = 只读工具面（FR-33 起 qa 也含 list/read）且无 tool/assistant 历史
+    const READONLY = new Set(['search_knowledge', 'list_workspace_docs', 'read_workspace_doc']);
     assert.ok(
       seenRequests.some(
         (r: any) =>
-          r.tools?.length === 1 &&
-          r.tools[0].function?.name === 'search_knowledge' &&
+          Array.isArray(r.tools) &&
+          r.tools.length >= 1 &&
+          r.tools.some((t: any) => t.function?.name === 'search_knowledge') &&
+          r.tools.every((t: any) => READONLY.has(t.function?.name)) &&
           !r.messages?.some((m: any) => m.role === 'tool' || m.role === 'assistant'),
       ),
     );
@@ -454,6 +457,138 @@ test('历史含 assistant 回复时不抛 content.flatMap 错误（线上回归�
     assert.ok(firstMsg, '请求应含历史 assistant 消息');
     assert.ok(JSON.stringify(firstMsg.content).includes('第一轮回复'));
   } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+// ─── FR-33：qa 场景有/无 Qdrant 两条检索路径 ───
+import { listAllDocs, upsertQdrantProfile } from './db.ts';
+import { setQdrantQueryForTests } from './qdrant-retriever.ts';
+import { pointId } from './qdrant-upsert.ts';
+
+test('FR-33 无 Qdrant：search_knowledge 走本地全文检索，返回命中文档 id 与摘录', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  const hitDoc = listAllDocs(userId)[0];
+  assert.ok(hitDoc, 'setupDb 应已建一篇文档');
+  mockResponses = [
+    [toolFrame('search_knowledge', '{"query":"正文A"}')],
+    [textFrame('答案见 [1]', 'stop', { prompt_tokens: 4, completion_tokens: 2 })],
+  ];
+  try {
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: '正文A 是什么', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    // 检索结果作为 tool 消息回传模型：含命中 doc id，且带摘录
+    const toolMsg = seenRequests[1].messages.find((m: any) => m.role === 'tool' || m.role === 'toolResult');
+    assert.ok(toolMsg, '第二轮应收到工具结果');
+    const toolRaw = typeof toolMsg.content === 'string' ? toolMsg.content : toolMsg.content[0].text;
+    const payload = JSON.parse(String(toolRaw));
+    assert.ok(Array.isArray(payload) && payload.length >= 1, '全文检索应命中至少一篇');
+    assert.equal(payload[0].id, String(hitDoc.id));
+    assert.match(payload[0].snippet, /正文A/);
+    // 兜底标记：无 Qdrant 时 runtime 结果带 retrievalFallback
+    assert.equal(result!.retrievalFallback, true);
+    // span 标出走了兜底
+    assert.ok(result!.spans.some((s) => s.name === 'search_knowledge' && String(s.detail || '').startsWith('fallback:')));
+  } finally {
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+test('FR-33 配了 Qdrant：search_knowledge 走向量检索，两路合并去重', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  upsertQdrantProfile(userId, 'http://q', null, 'col', null, 5);
+  const hitDoc = listAllDocs(userId)[0];
+  assert.ok(hitDoc, 'setupDb 应已建一篇文档');
+  // 注入向量检索结果：与本地命中的同一篇（应去重）+ 一篇只在向量里出现的
+  setQdrantQueryForTests(async () => [
+    { id: String(hitDoc.id), score: 0.91, payload: { title: 'A', text: '正文A 向量命中' } },
+    { id: 'vec-only', score: 0.5, payload: { title: '仅向量', text: '只在向量库里的片段' } },
+  ]);
+  mockResponses = [
+    [toolFrame('search_knowledge', '{"query":"正文A"}')],
+    [textFrame('综合回答 [1][2]', 'stop', { prompt_tokens: 4, completion_tokens: 2 })],
+  ];
+  try {
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: '正文A 是什么', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    const toolMsg = seenRequests[1].messages.find((m: any) => m.role === 'tool' || m.role === 'toolResult');
+    const toolRaw = typeof toolMsg.content === 'string' ? toolMsg.content : toolMsg.content[0].text;
+    const payload: Array<{ id: string }> = JSON.parse(String(toolRaw));
+    const ids = payload.map((p) => p.id);
+    assert.ok(ids.includes('vec-only'), '向量独有结果应保留');
+    assert.equal(ids.filter((x) => x === String(hitDoc.id)).length, 1, '两路同篇应去重为一条');
+    // 配了 Qdrant 时不算兜底
+    assert.notEqual(result!.retrievalFallback, true);
+    assert.ok(result!.spans.some((s) => s.name === 'search_knowledge' && s.detail === String(payload.length)));
+  } finally {
+    setQdrantQueryForTests(null);
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+// 真实 Qdrant 点 id 是 pointId() 生成的 UUID，与本地全文结果的 id（SQLite 行号）永不相等，
+// 只能靠 doc_key 去重。这里用真实 id 形状 + 同篇本地命中，断言整篇只出现一次且向量独有 chunk 不被误删。
+test('FR-33 配了 Qdrant：真实 UUID 点 id 下按 doc_key 去重，向量独有 chunk 保留', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  upsertQdrantProfile(userId, 'http://q', null, 'col', null, 5);
+  const hitDoc = listAllDocs(userId)[0];
+  assert.ok(hitDoc, 'setupDb 应已建一篇文档');
+  // 同一篇文档的两个向量 chunk，点 id 用真实 UUID 形状；title 回退到 path，不带正文关键词，确保本地全文也能命中该篇
+  setQdrantQueryForTests(async () => [
+    { id: pointId(userId, hitDoc.doc_key, 0), score: 0.95, payload: { path: 'A.md', doc_key: hitDoc.doc_key, chunk_index: 0 } },
+    { id: pointId(userId, hitDoc.doc_key, 1), score: 0.90, payload: { path: 'A.md', doc_key: hitDoc.doc_key, chunk_index: 1 } },
+  ]);
+  mockResponses = [
+    [toolFrame('search_knowledge', '{"query":"正文A"}')],
+    [textFrame('答案 [1][2]', 'stop', { prompt_tokens: 4, completion_tokens: 2 })],
+  ];
+  try {
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: '正文A 是什么', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    const toolMsg = seenRequests[1].messages.find((m: any) => m.role === 'tool' || m.role === 'toolResult');
+    const toolRaw = typeof toolMsg.content === 'string' ? toolMsg.content : toolMsg.content[0].text;
+    const payload: Array<{ id: string; doc_key?: string }> = JSON.parse(String(toolRaw));
+    const chunk0 = pointId(userId, hitDoc.doc_key, 0);
+    const chunk1 = pointId(userId, hitDoc.doc_key, 1);
+    const ids = payload.map((p) => p.id);
+    // 向量两个 chunk 都保留（向量独有 chunk 不被误删）
+    assert.ok(ids.includes(chunk0) && ids.includes(chunk1), '同一篇的两个向量 chunk 都应保留');
+    // 本地整篇命中（id = SQLite 行号）按 doc_key 被剔除，不会多出一条重复引用
+    assert.ok(!ids.includes(String(hitDoc.id)), '本地同篇整篇命中应被剔除');
+    assert.equal(payload.length, 2, '合并结果应只剩该篇两个向量 chunk');
+    assert.notEqual(result!.retrievalFallback, true);
+  } finally {
+    setQdrantQueryForTests(null);
     mockServer?.close();
     mockServer = null;
     setChatRunnerForTests(null);

@@ -26,3 +26,12 @@ test('title 回退 path/source/url，snippet 回退 content', () => {
   assert.equal(hits[0].title, 'a.md');
   assert.equal(hits[0].snippet, 'hello world');
 });
+
+test('mapQdrantPoints 从 payload.doc_key 取 doc_key，缺失时为 undefined', () => {
+  const hits = mapQdrantPoints([
+    { id: 'f3256532-b37b-4214-104b-1e15a98570fb', score: 1, payload: { path: 'a.md', doc_key: 'a.md' } },
+    { id: 'x', score: 0.5, payload: { path: 'b.md' } },
+  ]);
+  assert.equal(hits[0].doc_key, 'a.md');
+  assert.equal(hits[1].doc_key, undefined);
+});
