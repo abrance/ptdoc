@@ -575,6 +575,8 @@ export function initDB(dbFile?: string): void {
   migrateSnapshotVersions(file);
   migrateApiTokenHash();
   migrateSpaceSchema();
+  // 必须跑在 migrateSpaceSchema 之后：依赖 space_id 已回填
+  migrateSpaceNamespace(file);
 }
 
 export function closeDB(): void {
@@ -844,7 +846,15 @@ export interface DocSummary {
   sort_order: number;
 }
 
-/** 按 doc_key 新增或更新一篇文档（全文 + 元信息）。 */
+/**
+ * 按 doc_key 新增或更新一篇文档（全文 + 元信息）。
+ *
+ * 空间语义（Space 命名空间）：
+ * - 给了 spaceId：只在该空间内 upsert。该空间没有同名、但其他空间有时，
+ *   自动加 ~n 后缀建一份新的（不盖别人空间的内容），返回最终 doc_key。
+ * - 没给 spaceId（老调用方 / ptdocctl 不带 --space）：落默认空间；若全局只有一份同名
+ *   则沿用旧行为直接更新它；全局多份则 409，要求带 space 指定。
+ */
 export function upsertDoc(
   userId: number,
   docKey: string,
@@ -854,32 +864,49 @@ export function upsertDoc(
   placement?: { spaceId?: number; folderId?: number | null },
 ): { id: number; doc_key: string } {
   const now = Date.now();
-  const existing = getDb()
-    .prepare('SELECT id, created_at FROM docs WHERE user_id=? AND doc_key=?')
-    .get(userId, docKey) as unknown as { id: number; created_at: number } | undefined;
+  const d = getDb();
+  const explicitSpace = placement?.spaceId;
+
+  let targetSpaceId: number;
+  let effectiveKey = docKey;
+  if (explicitSpace !== undefined) {
+    targetSpaceId = requireSpace(userId, explicitSpace).id;
+  } else {
+    // 不指定空间：先看全局是否只有一份，兼容旧调用
+    const rows = d
+      .prepare('SELECT id, space_id FROM docs WHERE user_id=? AND doc_key=?')
+      .all(userId, docKey) as unknown as Array<{ id: number; space_id: number | null }>;
+    if (rows.length > 1) {
+      throw new HttpError(409, `doc_key「${docKey}」在 ${rows.length} 个空间都存在，写入必须带 space_id`);
+    }
+    targetSpaceId = rows[0]?.space_id ?? ensureDefaultSpace(userId).id;
+  }
+
+  const existing = d
+    .prepare('SELECT id, created_at FROM docs WHERE user_id=? AND space_id=? AND doc_key=?')
+    .get(userId, targetSpaceId, docKey) as unknown as { id: number; created_at: number } | undefined;
   if (existing) {
-    getDb()
-      .prepare(
-        'UPDATE docs SET title=?, filename=?, content=?, updated_at=?, last_opened_at=? WHERE user_id=? AND doc_key=?',
-      )
-      .run(title, filename, content, now, now, userId, docKey);
+    d.prepare(
+      'UPDATE docs SET title=?, filename=?, content=?, updated_at=?, last_opened_at=? WHERE user_id=? AND id=?',
+    ).run(title, filename, content, now, now, userId, existing.id);
     autoSnapshotIfChanged(userId, existing.id, content);
     return { id: existing.id, doc_key: docKey };
   }
-  // 新文档落在指定空间/目录；未指定则进该用户的默认空间根。已存在文档的归属只由 move 接口改，
-  // 保存正文时忽略 placement，避免「保存」意外挪动文档。
-  const spaceId = placement?.spaceId ?? ensureDefaultSpace(userId).id;
+
+  // 新文档：目标空间撞名则加后缀。没给 spaceId 且全局就一份同名时，上面已把 targetSpaceId
+  // 设为它的空间且会命中 existing；走到这里说明目标空间确实没这篇。
+  effectiveKey = freeDocKey(userId, targetSpaceId, docKey);
   const folderId = placement?.folderId ?? null;
-  assertDocContainer(userId, spaceId, folderId);
-  const sortOrder = nextDocSortOrder(userId, spaceId, folderId);
-  const info = getDb()
+  assertDocContainer(userId, targetSpaceId, folderId);
+  const sortOrder = nextDocSortOrder(userId, targetSpaceId, folderId);
+  const info = d
     .prepare(
       'INSERT INTO docs (user_id, doc_key, title, filename, content, created_at, updated_at, last_opened_at, space_id, folder_id, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
     )
-    .run(userId, docKey, title, filename, content, now, now, now, spaceId, folderId, sortOrder);
+    .run(userId, effectiveKey, title, filename, content, now, now, now, targetSpaceId, folderId, sortOrder);
   const createdId = Number(info.lastInsertRowid);
   autoSnapshotIfChanged(userId, createdId, content);
-  return { id: createdId, doc_key: docKey };
+  return { id: createdId, doc_key: effectiveKey };
 }
 
 export function getDoc(userId: number, id: number): DocRow | undefined {
@@ -888,21 +915,54 @@ export function getDoc(userId: number, id: number): DocRow | undefined {
     | undefined;
 }
 
-export function getDocByKey(userId: number, docKey: string): DocRow | undefined {
-  return getDb().prepare('SELECT * FROM docs WHERE user_id=? AND doc_key=?').get(userId, docKey) as
-    | unknown as DocRow
-    | undefined;
+/** 在指定空间里找 doc_key；spaceId 省略则不限定空间，跨空间多命中直接 409（不静默选一个）。 */
+export function getDocByKey(userId: number, docKey: string, spaceId?: number): DocRow | undefined {
+  const d = getDb();
+  if (spaceId !== undefined) {
+    return d.prepare('SELECT * FROM docs WHERE user_id=? AND space_id=? AND doc_key=?').get(userId, spaceId, docKey) as
+      | unknown as DocRow
+      | undefined;
+  }
+  const rows = d.prepare('SELECT * FROM docs WHERE user_id=? AND doc_key=?').all(userId, docKey) as unknown as DocRow[];
+  if (rows.length > 1) {
+    const spaces = rows.map((r) => r.space_id).filter((x): x is number => x != null);
+    throw new HttpError(409, `doc_key「${docKey}」在 ${spaces.length} 个空间都存在，请带 space 参数指定`);
+  }
+  return rows[0];
 }
 
-export function searchDocs(userId: number, q: string, limit = 50): DocSummary[] {
+/** 目标空间里这个 key 是否已被占用（不含指定文档，供改名/搬移判定）。 */
+function docKeyTaken(userId: number, spaceId: number, docKey: string, excludeId = -1): boolean {
+  const row = getDb()
+    .prepare('SELECT id FROM docs WHERE user_id=? AND space_id=? AND doc_key=? AND id<>?')
+    .get(userId, spaceId, docKey, excludeId);
+  return Boolean(row);
+}
+
+/** 撞名时给下一个可用 key：README.md → README~2.md（多空间共存的核心机制）。 */
+function freeDocKey(userId: number, spaceId: number, docKey: string, excludeId = -1): string {
+  if (!docKeyTaken(userId, spaceId, docKey, excludeId)) return docKey;
+  const dot = docKey.lastIndexOf('.');
+  const stem = dot > 0 ? docKey.slice(0, dot) : docKey;
+  const ext = dot > 0 ? docKey.slice(dot) : '';
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${stem}~${n}${ext}`;
+    if (!docKeyTaken(userId, spaceId, candidate, excludeId)) return candidate;
+  }
+  throw new HttpError(409, `「${docKey}」在目标空间同名副本过多，请换个文件名`);
+}
+
+export function searchDocs(userId: number, q: string, limit = 50, spaceId?: number): DocSummary[] {
   const like = `%${q}%`;
+  const scope = spaceId === undefined ? '' : ' AND space_id=?';
+  const params: unknown[] = spaceId === undefined ? [userId, like, like, like, limit] : [userId, like, like, like, spaceId, limit];
   return getDb()
     .prepare(
       `SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs
-       WHERE user_id=? AND (title LIKE ? OR filename LIKE ? OR content LIKE ?)
+       WHERE user_id=? AND (title LIKE ? OR filename LIKE ? OR content LIKE ?)${scope}
        ORDER BY last_opened_at DESC, updated_at DESC LIMIT ?`,
     )
-    .all(userId, like, like, like, limit) as unknown as DocSummary[];
+    .all(...(params as never[])) as unknown as DocSummary[];
 }
 
 export function listRecent(userId: number, limit = 50): DocSummary[] {
@@ -913,20 +973,25 @@ export function listRecent(userId: number, limit = 50): DocSummary[] {
     .all(userId, limit) as unknown as DocSummary[];
 }
 
-/** 全部文档（按 doc_key 排序），供侧边栏文档树构建。 */
-export function listAllDocs(userId: number): DocSummary[] {
+/** 全部文档（按 doc_key 排序）。可选按空间过滤。 */
+export function listAllDocs(userId: number, spaceId?: number): DocSummary[] {
+  const sql =
+    'SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs WHERE user_id=?' +
+    (spaceId === undefined ? '' : ' AND space_id=?') +
+    ' ORDER BY doc_key ASC';
   return getDb()
-    .prepare(
-      'SELECT id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order FROM docs WHERE user_id=? ORDER BY doc_key ASC',
-    )
-    .all(userId) as unknown as DocSummary[];
+    .prepare(sql)
+    .all(...((spaceId === undefined ? [userId] : [userId, spaceId]) as never[])) as unknown as DocSummary[];
 }
 
-/** 全部文档全文（含 content），供前端全文搜索索引构建。 */
-export function listAllDocsFull(userId: number): Array<DocRow & DocSummary> {
+/** 全部文档全文（含 content），供前端全文搜索索引构建。可选按空间过滤。 */
+export function listAllDocsFull(userId: number, spaceId?: number): Array<DocRow & DocSummary> {
+  const sql = 'SELECT * FROM docs WHERE user_id=?' + (spaceId === undefined ? '' : ' AND space_id=?') + ' ORDER BY doc_key ASC';
   return getDb()
-    .prepare('SELECT * FROM docs WHERE user_id=? ORDER BY doc_key ASC')
-    .all(userId) as unknown as Array<DocRow & DocSummary>;
+    .prepare(sql)
+    .all(...((spaceId === undefined ? [userId] : [userId, spaceId]) as never[])) as unknown as Array<
+    DocRow & DocSummary
+  >;
 }
 
 /** 重命名文档：更新 doc_key 并级联更新该文档的 shares 引用（同一事务）。 */
@@ -1305,8 +1370,13 @@ export function insertShare(
 ): { id: number } {
   const now = Date.now();
   // 兼容旧接口：沿用产物表的版本与状态语义，避免撞 ux_shares_active
-  const active = docKey ? getActiveArtifact(userId, docKey) : undefined;
-  const version = docKey ? maxArtifactVersion(userId, docKey) + 1 : 1;
+  const shareSpaceId = docKey
+    ? (getDb().prepare('SELECT space_id FROM docs WHERE user_id=? AND doc_key=?').get(userId, docKey) as
+        | { space_id: number | null }
+        | undefined)?.space_id ?? ensureDefaultSpace(userId).id
+    : null;
+  const active = docKey ? getActiveArtifact(userId, docKey, shareSpaceId ?? undefined) : undefined;
+  const version = docKey ? maxArtifactVersion(userId, docKey, shareSpaceId ?? undefined) + 1 : 1;
   const d = getDb();
   d.exec('BEGIN');
   let shareId: number;
@@ -1316,7 +1386,7 @@ export function insertShare(
     }
     const info = d
       .prepare(
-        'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, source_content_sha256, created_at, version, status) VALUES (?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO shares (user_id, doc_key, share_md, md_url, html_url, source_content_sha256, created_at, version, status, space_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
       )
       .run(
         userId,
@@ -1328,6 +1398,7 @@ export function insertShare(
         now,
         version,
         docKey ? 'active' : 'superseded',
+        shareSpaceId,
       );
     shareId = Number(info.lastInsertRowid);
     d.exec('COMMIT');
@@ -1450,7 +1521,7 @@ export function sha256Content(content: string): string {
 }
 
 /** 归档相关接口的路径参数既可是数字 doc id，也可是 doc_key（URL 里带 / 的 key 只能是转义形式）。 */
-export function resolveDocRef(userId: number, ref: string | number): DocRow | undefined {
+export function resolveDocRef(userId: number, ref: string | number, spaceId?: number): DocRow | undefined {
   let s = String(ref);
   if (s.includes('%')) {
     try {
@@ -1463,19 +1534,22 @@ export function resolveDocRef(userId: number, ref: string | number): DocRow | un
     const byId = getDoc(userId, Number(s));
     if (byId) return byId;
   }
-  return getDocByKey(userId, s);
+  return getDocByKey(userId, s, spaceId);
 }
 
-export function getActiveArtifact(userId: number, docKey: string): ArtifactRow | undefined {
+const spaceScope = (spaceId?: number): string => (spaceId === undefined ? '' : ' AND space_id=?');
+const spaceArg = (spaceId?: number): never[] => (spaceId === undefined ? [] : [spaceId as never]);
+
+export function getActiveArtifact(userId: number, docKey: string, spaceId?: number): ArtifactRow | undefined {
   return getDb()
-    .prepare("SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status='active'")
-    .get(userId, docKey) as unknown as ArtifactRow | undefined;
+    .prepare(`SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status='active'${spaceScope(spaceId)}`)
+    .get(...([userId, docKey, ...spaceArg(spaceId)] as never[])) as unknown as ArtifactRow | undefined;
 }
 
-export function maxArtifactVersion(userId: number, docKey: string): number {
+export function maxArtifactVersion(userId: number, docKey: string, spaceId?: number): number {
   const row = getDb()
-    .prepare('SELECT COALESCE(MAX(version), 0) AS v FROM shares WHERE user_id=? AND doc_key=?')
-    .get(userId, docKey) as { v: number } | undefined;
+    .prepare(`SELECT COALESCE(MAX(version), 0) AS v FROM shares WHERE user_id=? AND doc_key=?${spaceScope(spaceId)}`)
+    .get(...([userId, docKey, ...spaceArg(spaceId)] as never[])) as { v: number } | undefined;
   return Number(row?.v ?? 0);
 }
 
@@ -1489,12 +1563,16 @@ export function getArtifact(userId: number, id: number): ArtifactRow | undefined
 export function listArtifacts(
   userId: number,
   docKey: string,
-  opts: { includeDeleted?: boolean } = {},
+  opts: { includeDeleted?: boolean; spaceId?: number } = {},
 ): ArtifactRow[] {
-  const sql = opts.includeDeleted
-    ? 'SELECT * FROM shares WHERE user_id=? AND doc_key=? ORDER BY version DESC'
-    : "SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status!='deleted' ORDER BY version DESC";
-  return getDb().prepare(sql).all(userId, docKey) as unknown as ArtifactRow[];
+  const base = opts.includeDeleted
+    ? 'SELECT * FROM shares WHERE user_id=? AND doc_key=?'
+    : "SELECT * FROM shares WHERE user_id=? AND doc_key=? AND status!='deleted'";
+  const sql = base + (opts.spaceId === undefined ? '' : ' AND space_id=?') + ' ORDER BY version DESC';
+  const args = opts.spaceId === undefined ? [userId, docKey] : [userId, docKey, opts.spaceId];
+  return getDb()
+    .prepare(sql)
+    .all(...(args as never[])) as unknown as ArtifactRow[];
 }
 
 /**
@@ -1555,22 +1633,29 @@ export interface NewArtifact {
  * 写入一次归档产物（FR-20）：旧 active → superseded，新行 version=max+1 且 active。
  * 单个事务；文件已上传完成才调用，失败不留半成品行。
  */
-export function insertArtifact(userId: number, docKey: string, input: NewArtifact): ArtifactRow {
+export function insertArtifact(
+  userId: number,
+  docKey: string,
+  input: NewArtifact,
+  spaceId?: number,
+): ArtifactRow {
   const d = getDb();
   const now = input.createdAt ?? Date.now();
+  const scope = spaceId === undefined ? '' : ' AND space_id=?';
+  const scopeArgs = spaceId === undefined ? [] : [spaceId];
   let id = 0;
   d.exec('BEGIN');
   try {
     d.prepare(
-      "UPDATE shares SET status='superseded', superseded_at=? WHERE user_id=? AND doc_key=? AND status='active'",
-    ).run(now, userId, docKey);
-    const version = maxArtifactVersion(userId, docKey) + 1;
+      `UPDATE shares SET status='superseded', superseded_at=? WHERE user_id=? AND doc_key=? AND status='active'${scope}`,
+    ).run(...([now, userId, docKey, ...scopeArgs] as never[]));
+    const version = maxArtifactVersion(userId, docKey, spaceId) + 1;
     const info = d
       .prepare(
         `INSERT INTO shares
          (user_id, doc_key, share_md, md_url, html_url, md_key, html_key, md_size, html_size,
-          source_content_sha256, note, version, status, source_kind, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          source_content_sha256, note, version, status, source_kind, created_at, space_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         userId,
@@ -1588,6 +1673,7 @@ export function insertArtifact(userId: number, docKey: string, input: NewArtifac
         'active',
         'archive',
         now,
+        spaceId ?? null,
       );
     id = Number(info.lastInsertRowid);
     d.exec('COMMIT');
@@ -1646,19 +1732,30 @@ export interface ArchiveItem {
   token: string;
   history_count: number;
   note: string | null;
+  /** 归属空间：全部空间视图按它分组 */
+  space_id: number | null;
+  space_name: string | null;
 }
 
 /** 归档列表：每文档一行（有 active 产物，或 includeAll 时含已删除产物的文档）。 */
-export function listArchiveItems(userId: number, q?: string, includeAll = false): { items: ArchiveItem[] } {
+export function listArchiveItems(
+  userId: number,
+  q?: string,
+  includeAll = false,
+  spaceId?: number,
+): { items: ArchiveItem[] } {
   const rows = getDb()
     .prepare(
       `SELECT s.id, s.doc_key, s.version, s.status, s.created_at, s.note, s.source_content_sha256,
-              d.id AS doc_id, d.title, d.content, d.archive_token
-       FROM shares s JOIN docs d ON d.user_id = s.user_id AND d.doc_key = s.doc_key
+              d.id AS doc_id, d.title, d.content, d.archive_token, d.space_id, sp.name AS space_name
+       FROM shares s
+       JOIN docs d ON d.user_id = s.user_id AND d.doc_key = s.doc_key AND d.space_id IS s.space_id
+       LEFT JOIN spaces sp ON sp.id = d.space_id AND sp.user_id = d.user_id
        WHERE s.user_id=? AND s.doc_key IS NOT NULL AND s.doc_key != '' AND s.status != 'deleted'
+         ${spaceId === undefined ? '' : ' AND d.space_id=?'}
        ORDER BY s.created_at DESC, s.id DESC`,
     )
-    .all(userId) as Array<{
+    .all(...((spaceId === undefined ? [userId] : [userId, spaceId]) as never[])) as Array<{
     id: number;
     doc_key: string;
     version: number;
@@ -1670,11 +1767,15 @@ export function listArchiveItems(userId: number, q?: string, includeAll = false)
     title: string;
     content: string;
     archive_token: string | null;
+    space_id: number | null;
+    space_name: string | null;
   }>;
 
+  // 两空间可各有同名 doc_key，所以按 (space_id, doc_key) 归并，不能只用 doc_key
   const byDoc = new Map<string, ArchiveItem & { history_count: number }>();
   for (const r of rows) {
-    const existing = byDoc.get(r.doc_key);
+    const groupKey = `${r.space_id ?? 0}:${r.doc_key}`;
+    const existing = byDoc.get(groupKey);
     const isActive = r.status === 'active';
     if (!r.archive_token) continue; // 无 token 的存量文档不入列表（首次归档后出现）
     if (existing) {
@@ -1693,7 +1794,7 @@ export function listArchiveItems(userId: number, q?: string, includeAll = false)
       // 无 active 产物（已被删除）的文档默认不显示；includeAll 时用最新一条占位
       continue;
     }
-    byDoc.set(r.doc_key, {
+    byDoc.set(groupKey, {
       doc_id: r.doc_id,
       doc_key: r.doc_key,
       title: r.title,
@@ -1703,6 +1804,8 @@ export function listArchiveItems(userId: number, q?: string, includeAll = false)
       token: r.archive_token,
       history_count: isActive ? 0 : 1,
       note: r.note,
+      space_id: r.space_id,
+      space_name: r.space_name,
     });
   }
 
@@ -2251,10 +2354,12 @@ function tryAssignArchivePath(userId: number, docId: number, path: string): bool
 }
 
 /** 若文档尚无 archive_path，写入 doc_key；冲突则改用 doc_key~id。 */
-export function ensureArchivePath(userId: number, docKey: string): void {
+export function ensureArchivePath(userId: number, docKey: string, spaceId?: number): void {
   const doc = getDb()
-    .prepare('SELECT id, archive_path FROM docs WHERE user_id=? AND doc_key=?')
-    .get(userId, docKey) as { id: number; archive_path: string | null } | undefined;
+    .prepare(`SELECT id, archive_path FROM docs WHERE user_id=? AND doc_key=?${spaceScope(spaceId)}`)
+    .get(...([userId, docKey, ...spaceArg(spaceId)] as never[])) as
+    | { id: number; archive_path: string | null }
+    | undefined;
   if (!doc || doc.archive_path) return;
   if (tryAssignArchivePath(userId, doc.id, docKey)) return;
   if (tryAssignArchivePath(userId, doc.id, `${docKey}~${doc.id}`)) return;
@@ -2263,14 +2368,14 @@ export function ensureArchivePath(userId: number, docKey: string): void {
   }
 }
 
-function hasPublishedShare(userId: number, docKey: string): boolean {
+function hasPublishedShare(userId: number, docKey: string, spaceId?: number): boolean {
   const row = getDb()
     .prepare(
       `SELECT id FROM shares
-       WHERE user_id=? AND doc_key=? AND html_url IS NOT NULL AND html_url != ''
+       WHERE user_id=? AND doc_key=? AND html_url IS NOT NULL AND html_url != ''${spaceScope(spaceId)}
        LIMIT 1`,
     )
-    .get(userId, docKey) as { id: number } | undefined;
+    .get(...([userId, docKey, ...spaceArg(spaceId)] as never[])) as { id: number } | undefined;
   return Boolean(row);
 }
 
@@ -2604,14 +2709,32 @@ export function createSpace(userId: number, rawName: unknown): SpaceRow {
 export function renameSpace(userId: number, rawId: unknown, rawName: unknown): { ok: true } {
   const space = requireSpace(userId, rawId);
   const name = normalizeSpaceName(rawName, '空间');
-  if (space.is_default === 1 && name.toLowerCase() !== DEFAULT_SPACE_NAME)
-    throw new HttpError(400, '默认空间不能改名');
   const dup = getDb()
     .prepare('SELECT id FROM spaces WHERE user_id=? AND name=? COLLATE NOCASE AND id<>?')
     .get(userId, name, space.id) as { id: number } | undefined;
   if (dup) throw new HttpError(409, '空间名称已被使用');
   getDb().prepare('UPDATE spaces SET name=? WHERE id=? AND user_id=?').run(name, space.id, userId);
   return { ok: true };
+}
+
+/**
+ * 转移默认空间标记：恒有一个默认（不可删），可以换成另一个空间。
+ * 换完后原默认空间变成普通空间，仍可继续使用。
+ */
+export function setDefaultSpace(userId: number, rawId: unknown): { ok: true; space_id: number } {
+  const target = requireSpace(userId, rawId);
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    // 先把现有默认置 0，否则会撞 idx_spaces_default 的部分唯一索引
+    d.prepare('UPDATE spaces SET is_default=0 WHERE user_id=? AND is_default=1').run(userId);
+    d.prepare('UPDATE spaces SET is_default=1 WHERE id=? AND user_id=?').run(target.id, userId);
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+  return { ok: true, space_id: target.id };
 }
 
 /**
@@ -2902,7 +3025,7 @@ export function moveDoc(
   userId: number,
   docId: number,
   body: DocPlacementBody,
-): { ok: true; space_id: number; folder_id: number | null; sort_order: number } {
+): { ok: true; space_id: number; folder_id: number | null; sort_order: number; doc_key: string } {
   const doc = getDoc(userId, docId);
   if (!doc) throw new HttpError(404, '文档不存在');
   const curSpaceId = doc.space_id ?? ensureDefaultSpace(userId).id;
@@ -2914,25 +3037,40 @@ export function moveDoc(
     targetFolderId = targetSpace.id === curSpaceId ? doc.folder_id : null;
   }
   assertDocContainer(userId, targetSpace.id, targetFolderId);
+  // 跨空间搬移撞名：自动变 README~2.md（与 ptdocctl push 一致），返回最终 key 供 UI 提示
+  const movedKey = targetSpace.id === curSpaceId ? doc.doc_key : freeDocKey(userId, targetSpace.id, doc.doc_key, doc.id);
+  const keyChanged = movedKey !== doc.doc_key;
   const siblings = docSiblingIds(userId, targetSpace.id, targetFolderId, doc.id);
   const idx = insertIndex(siblings, body, '目标空间/目录');
   const ordered = [...siblings.slice(0, idx), doc.id, ...siblings.slice(idx)];
   const d = getDb();
   d.exec('BEGIN');
   try {
-    d.prepare('UPDATE docs SET space_id=?, folder_id=? WHERE id=? AND user_id=?').run(
+    d.prepare('UPDATE docs SET space_id=?, folder_id=?, doc_key=? WHERE id=? AND user_id=?').run(
       targetSpace.id,
       targetFolderId,
+      movedKey,
       doc.id,
       userId,
     );
+    if (keyChanged) {
+      // 归档记录跟着改名，否则归档列表按 doc_key join 会掉行
+      d.prepare('UPDATE shares SET doc_key=?, space_id=? WHERE user_id=? AND doc_key=?').run(
+        movedKey,
+        targetSpace.id,
+        userId,
+        doc.doc_key,
+      );
+    } else {
+      d.prepare('UPDATE shares SET space_id=? WHERE user_id=? AND doc_key=?').run(targetSpace.id, userId, doc.doc_key);
+    }
     renumberDocSiblings(userId, targetSpace.id, targetFolderId, ordered);
     d.exec('COMMIT');
   } catch (e) {
     d.exec('ROLLBACK');
     throw e;
   }
-  return { ok: true, space_id: targetSpace.id, folder_id: targetFolderId, sort_order: idx };
+  return { ok: true, space_id: targetSpace.id, folder_id: targetFolderId, sort_order: idx, doc_key: movedKey };
 }
 
 /** 同容器内重排：给了不同的 space_id / folder_id 就拒绝（那是 move）。 */
@@ -3037,4 +3175,170 @@ function migrateSpaceSchema(): void {
     d.exec('ROLLBACK');
     throw e;
   }
+}
+
+// ─── Space 命名空间（doc_key 从「每用户唯一」放宽到「每空间唯一」）─────────
+
+/** doc_key 跨空间命名空间迁移标记（schema_meta 里存，避免和 PRAGMA user_version 抢号）。 */
+const SPACE_NAMESPACE_FLAG = 'space_namespace';
+
+function spaceNamespaceDone(): boolean {
+  const row = getDb().prepare('SELECT value FROM schema_meta WHERE key=?').get(SPACE_NAMESPACE_FLAG) as
+    | { value: string }
+    | undefined;
+  return row?.value === '1';
+}
+
+/**
+ * 把 docs 的 UNIQUE(user_id, doc_key) 放宽成 UNIQUE(user_id, space_id, doc_key)，
+ * 同时把 archive_path 与 shares 的活跃唯一键也加上空间维度。
+ *
+ * SQLite 删不掉列级约束，只能重建表。docs 的列全在这里列一遍（迁移只跑一次且有标记，
+ * 新增列请走 ALTER + 新的迁移版本，不要改这里）。
+ * 前置条件：migrateSpaceSchema 已把 space_id 回填满（本函数前会再确保一次）。
+ */
+function migrateSpaceNamespace(file: string): void {
+  const d = getDb();
+  if (spaceNamespaceDone()) return;
+
+  // 有内容才值得备份；空库直接建表更省事
+  const docCount = (d.prepare('SELECT COUNT(*) AS n FROM docs').get() as { n: number }).n;
+  if (docCount > 0) backupBeforeSpaceNamespace(file);
+
+  // 0. 老库（user_version=7 等）可能还没这些列，ALTER 补齐后再按固定列表重建
+  for (const [col, def] of [
+    ['archive_path', 'TEXT'],
+    ['qdrant_sync_share_id', 'INTEGER'],
+    ['qdrant_synced_at', 'INTEGER'],
+    ['archive_token', 'TEXT'],
+    ['space_id', 'INTEGER'],
+    ['folder_id', 'INTEGER'],
+    ['sort_order', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) {
+    if (!tableHasColumn('docs', col)) {
+      try {
+        d.exec(`ALTER TABLE docs ADD COLUMN ${col} ${def}`);
+      } catch {
+        /* 并发/已存在则忽略 */
+      }
+    }
+  }
+
+  // 与 migrateToMultiUser 同一个坑：doc_versions.doc_id → docs.id、images.share_id → shares.id，
+  // 子行存在时 DROP TABLE 会抛 FOREIGN KEY constraint failed。两个 PRAGMA 都必须在事务之外。
+  d.exec('PRAGMA foreign_keys = OFF');
+  d.exec('BEGIN');
+  try {
+    // 1. 兜底：space_id 仍为空的文档归到各自默认空间（正常情况下 migrateSpaceSchema 已做完）
+    const orphans = d
+      .prepare('SELECT DISTINCT user_id FROM docs WHERE space_id IS NULL')
+      .all() as Array<{ user_id: number }>;
+    for (const o of orphans) {
+      const space = ensureDefaultSpace(o.user_id);
+      d.prepare('UPDATE docs SET space_id=? WHERE user_id=? AND space_id IS NULL').run(space.id, o.user_id);
+    }
+
+    // 2. 重建 docs：列顺序与现表一致，唯一键改成 (user_id, space_id, doc_key)
+    d.exec(`
+      CREATE TABLE docs_ns (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL DEFAULT 0,
+        doc_key     TEXT NOT NULL,
+        title       TEXT NOT NULL DEFAULT '',
+        filename    TEXT NOT NULL DEFAULT '',
+        content     TEXT NOT NULL DEFAULT '',
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        last_opened_at INTEGER NOT NULL DEFAULT 0,
+        archive_path TEXT,
+        qdrant_sync_share_id INTEGER,
+        qdrant_synced_at INTEGER,
+        archive_token TEXT,
+        space_id INTEGER,
+        folder_id INTEGER,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    d.exec(`
+      INSERT INTO docs_ns (id, user_id, doc_key, title, filename, content, created_at, updated_at,
+                           last_opened_at, archive_path, qdrant_sync_share_id, qdrant_synced_at,
+                           archive_token, space_id, folder_id, sort_order)
+      SELECT id, user_id, doc_key, title, filename, content, created_at, updated_at,
+             last_opened_at, archive_path, qdrant_sync_share_id, qdrant_synced_at,
+             archive_token, space_id, folder_id, sort_order FROM docs;
+    `);
+    d.exec('DROP TABLE docs');
+    d.exec('ALTER TABLE docs_ns RENAME TO docs');
+    // NULL 安全：SQLite 的唯一索引把 NULL 视为互不相同，直写 SQL 的老代码可能不给 space_id。
+    // 用 COALESCE 把 NULL 归到 0，否则同一空间两条 NULL 行会绕过唯一约束。
+    d.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_docs_space_key ON docs(user_id, COALESCE(space_id,0), doc_key)',
+    );
+    d.exec('CREATE INDEX IF NOT EXISTS idx_docs_updated ON docs(updated_at DESC)');
+    d.exec('CREATE INDEX IF NOT EXISTS idx_docs_space ON docs(user_id, space_id, folder_id, sort_order)');
+    d.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_archive_path ON docs(user_id, space_id, archive_path) WHERE archive_path IS NOT NULL',
+    );
+    d.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_docs_archive_token ON docs(archive_token) WHERE archive_token IS NOT NULL');
+
+    // 3. shares 加 space_id 并按 doc_key 回填（此时 doc_key 每用户仍唯一，回填无歧义）
+    if (!tableHasColumn('shares', 'space_id')) d.exec('ALTER TABLE shares ADD COLUMN space_id INTEGER');
+    d.exec(`
+      UPDATE shares
+         SET space_id = (SELECT d.space_id FROM docs d WHERE d.user_id = shares.user_id AND d.doc_key = shares.doc_key)
+       WHERE space_id IS NULL;
+    `);
+    // 找不到对应文档的孤儿分享归到各自默认空间，保证活跃唯一键非空
+    const shareOrphans = d
+      .prepare('SELECT DISTINCT user_id FROM shares WHERE space_id IS NULL')
+      .all() as Array<{ user_id: number }>;
+    for (const o of shareOrphans) {
+      const space = ensureDefaultSpace(o.user_id);
+      d.prepare('UPDATE shares SET space_id=? WHERE user_id=? AND space_id IS NULL').run(space.id, o.user_id);
+    }
+    // 极老的库可能还没 status 列（归档产物迁移被 user_version 跳过的场景）：建不了带
+    // status 谓词的索引就跳过，等那套迁移补上列后的下次启动再建。
+    if (tableHasColumn('shares', 'status')) {
+      d.exec('DROP INDEX IF EXISTS ux_shares_active');
+      d.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_shares_active ON shares(user_id, COALESCE(space_id,0), doc_key) WHERE status='active'",
+      );
+    }
+
+    d.prepare('INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)').run(SPACE_NAMESPACE_FLAG, '1');
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  } finally {
+    d.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+/** 重建 docs 前留一份带时间戳的备份，与既有迁移的备份习惯一致。 */
+function backupBeforeSpaceNamespace(file: string): void {
+  try {
+    const stamp = Date.now();
+    const target = `${file}.bak-space-ns-${stamp}`;
+    getDb().exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    console.log(`[db] Space 命名空间迁移前已备份数据库：${target}`);
+  } catch (e) {
+    console.log(`[db] Space 命名空间迁移前备份失败（继续迁移）：${(e as Error).message}`);
+  }
+}
+
+/**
+ * 解析读接口的 `?space=` 过滤参数。
+ * - 缺省 / 空 / `all` → undefined（不过滤，保持向后兼容）
+ * - 数字 id 或空间名 → 该空间 id（不存在则 400）
+ */
+export function parseSpaceFilter(userId: number, raw: string | null | undefined): number | undefined {
+  const v = (raw ?? '').trim();
+  if (!v || v === 'all') return undefined;
+  if (/^\d+$/.test(v)) return requireSpace(userId, v).id;
+  const row = getDb()
+    .prepare('SELECT id FROM spaces WHERE user_id=? AND name=? COLLATE NOCASE')
+    .get(userId, v) as { id: number } | undefined;
+  if (!row) throw new HttpError(400, `空间「${v}」不存在`);
+  return row.id;
 }

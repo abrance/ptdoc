@@ -119,8 +119,8 @@ test('M2-0 迁移(8)：存量快照回填 kind/sha/size，建 user_settings，�
   closeDB();
   assert.equal(
     readdirSync(dir).filter((f) => f.includes('.bak-')).length,
-    1,
-    '只应备份一次（快照迁移只跑一次；归档迁移在 user_version=7 时已跳过）',
+    2,
+    '快照迁移与 space 命名空间迁移各备份一次',
   );
 });
 

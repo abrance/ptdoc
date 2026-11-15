@@ -12,6 +12,7 @@ import {
   listAllArtifactKeys,
   markArtifactDeleted,
   resolveDocRef,
+  parseSpaceFilter,
   rotateDocArchiveToken,
   ensureDocArchiveToken,
 } from './db.ts';
@@ -126,7 +127,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
       if (mdMatch && (method === 'GET' || method === 'HEAD')) {
         const doc = findDocByArchiveToken(mdMatch[1]);
         if (!doc) return sendJson(res, 404, { error: 'Not Found' });
-        const art = doc ? getActiveArtifact(doc.user_id, doc.doc_key) : undefined;
+        const art = doc ? getActiveArtifact(doc.user_id, doc.doc_key, doc.space_id ?? undefined) : undefined;
         if (!art) return sendJson(res, 410, { error: '该归档已删除' });
         const download = new URLSearchParams(mdMatch[2] || '').get('download') === '1';
         res.statusCode = 200;
@@ -144,7 +145,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
       if (tokenMatch && (method === 'GET' || method === 'HEAD')) {
         const doc = findDocByArchiveToken(tokenMatch[1]);
         if (!doc) return sendJson(res, 404, { error: 'Not Found' });
-        const art = getActiveArtifact(doc.user_id, doc.doc_key);
+        const art = getActiveArtifact(doc.user_id, doc.doc_key, doc.space_id ?? undefined);
         if (!art) return sendJson(res, 410, { error: '该归档已删除' });
         return sendHtml(res, 200, buildShareHtmlDoc(freshUrls(doc.user_id, art.share_md), doc.title));
       }
@@ -157,7 +158,8 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         const u = new URL(url, 'http://localhost');
         const q = u.searchParams.get('q') || undefined;
         const includeAll = u.searchParams.get('include') === 'all';
-        const { items } = listArchiveItems(uid, q, includeAll);
+        const space = parseSpaceFilter(uid, u.searchParams.get('space'));
+        const { items } = listArchiveItems(uid, q, includeAll, space);
         // 侧边栏归档树仍读 {entries, folders}（归档路径树）；items 供归档产物列表用，两者并存避免两套调用方互踢
         const { entries, folders } = listArchive(uid, q);
         return sendJson(res, 200, {
@@ -221,7 +223,8 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         const body = await readJson(req).catch(() => ({}) as any);
         const theDoc = resolveDocRef(uid, archiveMatch[1]);
         if (!theDoc) throw new HttpError(404, '文档不存在');
-        const out = await archiveDoc(uid, theDoc.doc_key, body?.note ?? null);
+        // 传 id 而不是 doc_key：同名文档可分属不同空间，传 key 会因歧义 409
+        const out = await archiveDoc(uid, theDoc.id, body?.note ?? null);
         const token = out.token;
         return sendJson(res, 200, {
           id: out.artifact.id,
@@ -238,7 +241,7 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         const doc = resolveDocRef(uid, archiveMatch[1]);
         if (!doc) throw new HttpError(404, '文档不存在');
         const token = ensureDocArchiveToken(uid, doc.id);
-        const all = listArtifacts(uid, doc.doc_key);
+        const all = listArtifacts(uid, doc.doc_key, { spaceId: doc.space_id ?? undefined });
         const current = all.find((a) => a.status === 'active') ?? null;
         const history = all.filter((a) => a.id !== current?.id);
         const st = archiveStatusOf(uid, doc.doc_key);

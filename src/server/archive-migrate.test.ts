@@ -132,20 +132,56 @@ test('FR-19 存量迁移：5 文档 12 shares → 每文档 1 条 active、版�
   const after = d2.prepare('SELECT id, version, status FROM shares ORDER BY id').all();
   assert.deepEqual(after, before, '重复启动不应改动已有数据');
   const baks = readdirSync(dir).filter((f) => f.includes('.bak-'));
-  assert.equal(baks.length, 2, '归档迁移(7)与快照迁移(8)各备份一次，重复启动不再备份');
+  assert.equal(
+    baks.length,
+    3,
+    '归档迁移(7)、快照迁移(8)、space 命名空间迁移各备份一次，重复启动不再备份',
+  );
   d2.close();
   closeDB();
 });
 
-test('FR-19 唯一索引生效：同文档第二条 active 插入报错', () => {
+test('FR-19 唯一索引生效：同一空间同文档第二条 active 插入报错', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ptdoc-arch-uq-'));
   const file = join(dir, 't.db');
   makeLegacyDb(file);
   initDB(file);
   const d = new DatabaseSync(file);
+  // Space 命名空间后，唯一键是 (user_id, space_id, doc_key)：老库里 'a' 已回填到默认空间
+  const sid = (d.prepare("SELECT space_id FROM docs WHERE doc_key='a'").get() as { space_id: number }).space_id;
   assert.throws(() => {
-    d.prepare("INSERT INTO shares (user_id,doc_key,share_md,created_at,version,status) VALUES (1,'a','x',1,9,'active')").run();
+    d.prepare(
+      'INSERT INTO shares (user_id,doc_key,share_md,created_at,version,status,space_id) VALUES (1,?,?,?,?,?,?)',
+    ).run('a', 'x', 1, 9, 'active', sid);
   }, /UNIQUE|constraint/i);
+  d.close();
+  closeDB();
+});
+
+test('Space 命名空间：两个空间可各有同名文档与各自 active 归档', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ptdoc-arch-ns-'));
+  const file = join(dir, 't.db');
+  makeLegacyDb(file);
+  initDB(file);
+  const d = new DatabaseSync(file);
+  const now = Date.now();
+  const s2 = d
+    .prepare("INSERT INTO spaces (user_id,name,is_default,sort_order,created_at) VALUES (1,'工作',0,1,?) RETURNING id")
+    .get(now) as { id: number };
+  // 空间 2 也能插一份同名 a（老库里 a 在默认空间）
+  d.prepare(
+    'INSERT INTO docs (user_id,doc_key,title,filename,content,created_at,updated_at,space_id) VALUES (1,?,?,?,?,?,?,?)',
+  ).run('a', '空间2的a', 'a.md', 'other', now, now, s2.id);
+  const second = d
+    .prepare(
+      'INSERT INTO shares (user_id,doc_key,share_md,created_at,version,status,space_id) VALUES (1,?,?,?,?,?,?) RETURNING id',
+    )
+    .get('a', 'md', now, 1, 'active', s2.id) as { id: number };
+  assert.ok(second.id > 0, '不同空间同名文档可各自 active');
+  const rows = d.prepare("SELECT space_id FROM shares WHERE doc_key='a' AND status='active' ORDER BY space_id").all() as Array<{
+    space_id: number;
+  }>;
+  assert.equal(rows.length, 2, '两个空间各一条 active');
   d.close();
   closeDB();
 });

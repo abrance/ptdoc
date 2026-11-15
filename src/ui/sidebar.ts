@@ -16,6 +16,7 @@ import {
   type SpaceTreeNode,
 } from './space-tree';
 import { emptyStateBlockHtml } from './list-state';
+import { publishCurrentSpace } from './space-scope';
 
 // ─── 侧栏空间树（space → 目录 → 文档）──────────────────────
 // 服务端 /api/spaces/:id/tree 一次返回整棵树并已排好序；这里只按 parent 归位、渲染、拖拽。
@@ -25,6 +26,10 @@ interface SidebarOptions {
   getCurrentKey: () => string;
   onRenamed: (oldKey: string, newKey: string) => void;
   onStatus?: (msg: string, isError?: boolean) => void;
+  /** 当前文档有未保存改动时切空间要先确认（P3） */
+  isDirty?: () => boolean;
+  /** 切到新空间后挑一篇默认打开的文档（返回 null 表示该空间为空） */
+  pickDocForSpace?: (docs: Array<{ id: number }>) => number | null;
 }
 
 interface MenuItem {
@@ -56,7 +61,8 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   const newBtn = document.getElementById('sidebar-new') as HTMLButtonElement;
   const importBtn = document.getElementById('sidebar-import') as HTMLButtonElement;
   const spaceListEl = document.getElementById('space-list') as HTMLElement;
-  const spaceNewBtn = document.getElementById('space-new') as HTMLButtonElement;
+  const spaceSwitchBtn = document.getElementById('space-switch') as HTMLButtonElement;
+  const spaceSwitchName = document.getElementById('space-switch-name') as HTMLElement;
   const folderNewBtn = document.getElementById('folder-new') as HTMLButtonElement;
 
   let spaces: SpaceRow[] = [];
@@ -106,11 +112,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
 
   function rememberSpace(id: number): void {
     currentSpaceId = id;
-    try {
-      localStorage.setItem(SPACE_KEY, String(id));
-    } catch {
-      /* 隐私模式仅本次生效 */
-    }
+    publishCurrentSpace(id); // 写 localStorage + 广播，归档页/搜索跟着换
   }
 
   async function loadSpaces(): Promise<void> {
@@ -130,29 +132,68 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
     renderTree();
   }
 
+  const currentSpace = (): SpaceRow | undefined => spaces.find((s) => s.id === currentSpaceId);
+
   function renderSpaces(): void {
+    const cur = currentSpace();
+    spaceSwitchName.textContent = cur ? cur.name : '（无空间）';
+    spaceSwitchBtn.title = cur ? `当前空间：${cur.name}（点击切换）` : '切换空间';
     spaceListEl.innerHTML = '';
     for (const s of spaces) {
-      const chip = document.createElement('div');
-      chip.className = 'space-chip' + (s.id === currentSpaceId ? ' active' : '');
-      chip.dataset.spaceId = String(s.id);
-      chip.draggable = true;
-      chip.setAttribute('role', 'tab');
-      chip.setAttribute('aria-selected', String(s.id === currentSpaceId));
-      chip.tabIndex = 0;
-      chip.innerHTML = `
-        <button class="space-chip-name" type="button" data-space-open="${s.id}" title="切换到 ${esc(s.name)}">${esc(s.name)}</button>
-        <button class="space-chip-menu" type="button" data-space-menu="${s.id}" aria-label="${esc(s.name)} 的更多操作">⋯</button>`;
-      spaceListEl.appendChild(chip);
+      const row = document.createElement('div');
+      row.className = 'space-row' + (s.id === currentSpaceId ? ' active' : '');
+      row.dataset.spaceId = String(s.id);
+      row.draggable = true;
+      row.setAttribute('role', 'menuitem');
+      row.tabIndex = 0;
+      const tag = s.is_default === 1 ? '<span class="space-default-tag">默认</span>' : '';
+      row.innerHTML = `
+        <button class="space-row-name" type="button" data-space-open="${s.id}" title="切换到 ${esc(s.name)}">${esc(s.name)}${tag}</button>
+        <button class="space-row-menu" type="button" data-space-menu="${s.id}" aria-label="${esc(s.name)} 的更多操作">⋯</button>`;
+      spaceListEl.appendChild(row);
     }
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'space-menu-new';
+    add.dataset.spaceNew = '1';
+    add.textContent = '＋ 新建空间';
+    spaceListEl.appendChild(add);
   }
 
+  function setSpaceMenuOpen(open: boolean): void {
+    spaceListEl.hidden = !open;
+    spaceSwitchBtn.setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    // 打开时把当前项滚进视野，空间多了也不用手动找
+    const active = spaceListEl.querySelector<HTMLElement>('.space-row.active');
+    active?.scrollIntoView({ block: 'nearest' });
+  }
+
+  const spaceMenuOpen = (): boolean => !spaceListEl.hidden;
+
   async function switchSpace(id: number): Promise<void> {
-    if (id === currentSpaceId) return;
+    if (id === currentSpaceId) {
+      setSpaceMenuOpen(false);
+      return;
+    }
+    // 有未保存改动才拦（决策：无改动直接切，不打断）
+    if (opts.isDirty?.()) {
+      const target = spaces.find((s) => s.id === id);
+      const ok = await askConfirm(`当前文档有未保存的改动，切到「${target?.name ?? id}」会丢失这些改动。仍要切换？`, {
+        title: '切换空间',
+        confirmLabel: '放弃改动并切换',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     rememberSpace(id);
     renderSpaces();
+    setSpaceMenuOpen(false);
     try {
       await loadTree();
+      // 切空间后打开新空间的一篇文档，避免编辑器里留着上一个空间的正文
+      const nextId = opts.pickDocForSpace?.(tree?.docs ?? []) ?? null;
+      if (nextId != null) opts.onOpen(nextId);
     } catch (e) {
       tree = null;
       renderTree();
@@ -162,7 +203,8 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
 
   // ─── 树渲染 ───────────────────────────────────────────
   function isCurrentDoc(doc: SpaceDocRow): boolean {
-    return doc.doc_key === opts.getCurrentKey();
+    // doc_key 现在每空间唯一，两空间可同名：必须同时比空间，否则会同时高亮两篇
+    return doc.doc_key === opts.getCurrentKey() && doc.space_id === tree?.space.id;
   }
 
   function renderTree(): void {
@@ -895,8 +937,32 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   });
 
   // ─── 事件绑定 ─────────────────────────────────────────
+  spaceSwitchBtn.addEventListener('click', () => setSpaceMenuOpen(!spaceMenuOpen()));
+  spaceSwitchBtn.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSpaceMenuOpen(true);
+      spaceListEl.querySelector<HTMLElement>('.space-row-name')?.focus();
+    }
+  });
+  // 点菜单外关闭；Esc 也关
+  document.addEventListener('click', (e) => {
+    if (!spaceMenuOpen()) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('#space-bar')) return;
+    setSpaceMenuOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && spaceMenuOpen()) setSpaceMenuOpen(false);
+  });
+
   spaceListEl.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
+    if (target.closest('[data-space-new]')) {
+      setSpaceMenuOpen(false);
+      void createSpace();
+      return;
+    }
     const menuBtn = target.closest<HTMLElement>('[data-space-menu]');
     if (menuBtn) {
       const space = spaces.find((s) => s.id === Number(menuBtn.dataset.spaceMenu));
@@ -908,10 +974,10 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   });
   spaceListEl.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    const chip = (e.target as HTMLElement).closest<HTMLElement>('.space-chip');
-    if (!chip || (e.target as HTMLElement).closest('[data-space-menu]')) return;
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.space-row');
+    if (!row || (e.target as HTMLElement).closest('[data-space-menu]')) return;
     e.preventDefault();
-    void switchSpace(Number(chip.dataset.spaceId));
+    void switchSpace(Number(row.dataset.spaceId));
   });
 
   treeEl.addEventListener('click', (e) => {
@@ -930,7 +996,6 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
   searchEl.addEventListener('input', () => renderSearch(searchEl.value));
   newBtn.addEventListener('click', () => void createDoc(null));
   folderNewBtn.addEventListener('click', () => void createFolder(null));
-  spaceNewBtn.addEventListener('click', () => void createSpace());
 
   // ─── 批量导入文件夹（导入到当前空间根）───────────────
   importBtn.addEventListener('click', () => void importFolder());

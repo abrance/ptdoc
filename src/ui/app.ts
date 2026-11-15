@@ -19,6 +19,15 @@ import { paintStatus } from './status-line';
 import { emptyStateHtml, errorStateHtml, type RetryTarget } from './list-state';
 import { applyWorkspaceGate } from './auth-chrome';
 import {
+  getCurrentSpaceId,
+  loadSpaces,
+  onSpaceChanged,
+  readScope,
+  scopeSelectHtml,
+  syncScopeLabel,
+  type SpaceLite,
+} from './space-scope';
+import {
   initArchivePage,
   initArchiveToolbar,
   markArchiveStatusUnknown,
@@ -84,7 +93,11 @@ function setStatus(msg: string, isError = false): void {
 }
 
 // ─── 保存状态（状态栏右侧，和瞬时提示分开）────────────────
+/** 编辑器是否有未保存改动：setSaveState 是唯一写入点，切空间时读它决定要不要拦。 */
+let docDirty = false;
+
 function setSaveState(state: 'idle' | 'dirty' | 'saving' | 'saved' | 'error'): void {
+  docDirty = state === 'dirty' || state === 'error';
   const el = $('save-state');
   const at = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   el.className = 'save-state' + (state === 'error' ? ' error' : '');
@@ -699,8 +712,30 @@ function openNavSearchActive(): void {
 // 全文搜索索引（MiniSearch，惰性构建）：跨文档搜标题/文件名/正文
 let searchIndex: MiniSearch | null = null;
 let searchDocs: Array<{
-  id: number; doc_key: string; title: string; filename: string; content: string;
+  id: number; doc_key: string; title: string; filename: string; content: string; space_id?: number | null;
 }> = [];
+
+/** 全文搜索的空间作用域：默认当前空间，可切全部空间或指定空间（决策 P4）。 */
+let searchScopeEl: HTMLSelectElement | null = null;
+let searchSpaces: SpaceLite[] = [];
+
+const searchScope = (): number | 'all' => {
+  if (!searchScopeEl) return getCurrentSpaceId() ?? 'all';
+  return readScope(searchScopeEl);
+};
+
+async function paintSearchScope(): Promise<void> {
+  const slot = document.getElementById('global-scope-slot');
+  if (!slot) return;
+  searchSpaces = await loadSpaces();
+  slot.innerHTML = scopeSelectHtml('global-search-scope', searchSpaces, getCurrentSpaceId());
+  searchScopeEl = slot.querySelector<HTMLSelectElement>('#global-search-scope');
+  searchScopeEl?.addEventListener('change', () => {
+    if (($('global-search') as HTMLInputElement).value.trim()) {
+      renderSearchResults(($('global-search') as HTMLInputElement).value.trim(), $('global-search-list'));
+    }
+  });
+}
 
 async function ensureSearchIndex(): Promise<void> {
   if (searchIndex) return;
@@ -750,8 +785,15 @@ function renderSearchResults(q: string, list: HTMLElement): void {
     list.innerHTML = errorStateHtml('搜索失败，可能是本地索引损坏', 'search-index');
     return;
   }
+  const scope = searchScope();
+  if (scope !== 'all') {
+    // 索引是全库的（一次拉全量更省往返），按当前作用域过滤
+    results = results.filter((h) => searchDocs.find((d) => d.id === h.id)?.space_id === scope);
+  }
   if (results.length === 0) {
-    list.innerHTML = emptyStateHtml('没有匹配的文档');
+    list.innerHTML = emptyStateHtml(
+      scope === 'all' ? '没有匹配的文档' : '当前空间里没有匹配的文档（可切「全部空间」再搜）',
+    );
     return;
   }
   results.forEach((h, idx) => {
@@ -784,9 +826,10 @@ async function refreshHistory(q: string): Promise<void> {
     renderSearchResults(q.trim(), list);
     return;
   }
-  // 无输入：按"最近打开"列出
+  // 无输入：按"最近打开"列出（跟空间作用域）
   try {
-    const res = await fetch('/api/docs');
+    const scope = searchScope();
+    const res = await fetch(scope === 'all' ? '/api/docs' : `/api/docs?space=${scope}`);
     const docs = (await res.json()) as Array<{
       id: number; doc_key: string; title: string; filename: string; last_opened_at: number;
     }>;
@@ -828,9 +871,14 @@ function initGlobalSearch(): void {
   let closeTimer: number | undefined;
   const open = (): void => {
     historyActive = -1;
-    void refreshHistory(input.value).then(() => {
-      pop.hidden = false;
-    });
+    void paintSearchScope()
+      .catch(() => {
+        /* 下拉拿不到不影响搜索 */
+      })
+      .then(() => refreshHistory(input.value))
+      .then(() => {
+        pop.hidden = false;
+      });
   };
   input.addEventListener('focus', () => {
     clearTimeout(closeTimer);
@@ -842,6 +890,12 @@ function initGlobalSearch(): void {
     else if (e.key === 'ArrowUp') { e.preventDefault(); setNavSearchActive(-1); }
     else if (e.key === 'Enter') { e.preventDefault(); openNavSearchActive(); }
     else if (e.key === 'Escape') closeGlobalSearch();
+  });
+  onSpaceChanged(() => {
+    if (!searchScopeEl) return;
+    searchScopeEl.value = String(getCurrentSpaceId() ?? 'all');
+    syncScopeLabel(searchScopeEl, searchSpaces, getCurrentSpaceId());
+    if (!pop.hidden) void refreshHistory(input.value);
   });
   // 延迟失焦收起：让结果项的 click 先触发
   input.addEventListener('blur', () => {
@@ -1101,6 +1155,12 @@ void startGate((user: SessionUser) => {
       if (isMobileLayout()) setSidebarOpen(false);
     },
     getCurrentKey: () => currentDocKey,
+    isDirty: () => docDirty,
+    // 切空间后：优先开当前正打开的那篇（若在新空间里），否则开第一篇
+    pickDocForSpace: (docs) => {
+      if (currentDocId != null && docs.some((d) => d.id === currentDocId)) return currentDocId;
+      return docs[0]?.id ?? null;
+    },
     onStatus: setStatus,
     onRenamed: (oldKey, newKey) => {
       if (currentDocKey === oldKey) {

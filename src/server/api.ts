@@ -21,6 +21,8 @@ import {
   getRetention,
   setRetention,
   resolveDocRef,
+  parseSpaceFilter,
+  setDefaultSpace,
   restoreSnapshot,
   deleteSnapshot,
   insertShare,
@@ -183,6 +185,10 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       const spaceMatch = url.match(/^\/api\/spaces\/(\d+)(?:\?.*)?$/);
       if (spaceMatch && req.method === 'PATCH') {
         const b = await readJson(req);
+        // is_default 单独一个动作：转移默认标记（改名与转移互不干扰）
+        if (b.is_default === true || b.is_default === 1) {
+          return sendJson(res, 200, setDefaultSpace(uid, Number(spaceMatch[1])));
+        }
         return sendJson(res, 200, renameSpace(uid, Number(spaceMatch[1]), b.name));
       }
       if (spaceMatch && req.method === 'DELETE') {
@@ -299,7 +305,8 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, r);
       }
       if (url === '/api/docs/full' && req.method === 'GET') {
-        return sendJson(res, 200, listAllDocsFull(uid));
+        const space = parseSpaceFilter(uid, new URL(url, 'http://localhost').searchParams.get('space'));
+        return sendJson(res, 200, listAllDocsFull(uid, space));
       }
       if (url.startsWith('/api/docs/') && url.endsWith('/rename') && req.method === 'POST') {
         const id = Number(url.slice('/api/docs/'.length).split('/')[0]);
@@ -317,8 +324,10 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         return sendJson(res, 200, doc);
       }
       if (url.startsWith('/api/docs') && req.method === 'GET') {
-        const q = new URL(url, 'http://localhost').searchParams.get('q') || '';
-        const list = q ? searchDocs(uid, q) : listAllDocs(uid);
+        const params = new URL(url, 'http://localhost').searchParams;
+        const q = params.get('q') || '';
+        const space = parseSpaceFilter(uid, params.get('space'));
+        const list = q ? searchDocs(uid, q, 50, space) : listAllDocs(uid, space);
         return sendJson(res, 200, list);
       }
 

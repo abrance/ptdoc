@@ -241,7 +241,8 @@ export interface ArchiveOutcome {
 
 export async function archiveDoc(
   userId: number,
-  ref: string,
+  /** 数字 id 或 doc_key。调用方已经定位到文档时请传 id：doc_key 现在每空间唯一，跨空间重名会 409。 */
+  ref: string | number,
   note?: string | null,
 ): Promise<ArchiveOutcome> {
   const doc = resolveDocRef(userId, ref);
@@ -259,8 +260,9 @@ export async function archiveDoc(
   const title = doc.title || doc.doc_key;
   const html = buildShareHtmlDoc(prepared.md, title);
   const sha = sha256Content(doc.content);
-  const active = getActiveArtifact(userId, doc.doc_key);
-  const version = maxArtifactVersion(userId, doc.doc_key) + 1;
+  const spaceId = doc.space_id ?? undefined;
+  const active = getActiveArtifact(userId, doc.doc_key, spaceId);
+  const version = maxArtifactVersion(userId, doc.doc_key, spaceId) + 1;
   const base = `archive/${safeKeyPath(doc.doc_key)}/v${version}-${sha.slice(0, 8)}`;
   const mdBuf = Buffer.from(prepared.md, 'utf8');
   const htmlBuf = Buffer.from(html, 'utf8');
@@ -287,11 +289,11 @@ export async function archiveDoc(
       htmlSize: htmlBuf.length,
       sourceContentSha256: sha,
       note: note ?? null,
-    });
+    }, spaceId);
   } catch (e) {
     throw new HttpError(500, `写入归档记录失败：${(e as Error).message}`, 'db');
   }
-  ensureArchivePath(userId, doc.doc_key);
+  ensureArchivePath(userId, doc.doc_key, spaceId);
   return {
     artifact,
     token,
