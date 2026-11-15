@@ -27,6 +27,10 @@ import {
   reorderDoc,
   ensureDefaultSpace,
   claimOrphanRecords,
+  getDocByKey,
+  searchDocs,
+  listAllDocsFull,
+  setDefaultSpace,
 } from './db.ts';
 import { HttpError, hasBareDocKeySlash } from './http.ts';
 import { hashToken } from './auth.ts';
@@ -372,7 +376,10 @@ test('空间重排与改名', () => {
   const s2 = createSpace(u.id, 'B');
   assert.throws(() => createSpace(u.id, 'a'), is409, '同名（忽略大小写）');
   assert.throws(() => createSpace(u.id, 'default'), is409);
-  assert.throws(() => renameSpace(u.id, def.id, 'renamed'), is400, '默认空间不能改名');
+  // 默认空间可改名（不再强制叫 default）
+  renameSpace(u.id, def.id, '个人');
+  assert.equal(listSpaces(u.id).find((s) => s.id === def.id)!.name, '个人');
+  assert.throws(() => renameSpace(u.id, s1.id, '个人'), is409, '改名也要查重（忽略大小写）');
   renameSpace(u.id, s1.id, 'A2');
   assert.equal(listSpaces(u.id).find((s) => s.id === s1.id)!.name, 'A2');
 
@@ -517,5 +524,95 @@ test('HTTP：space/folder CRUD + move/reorder 走通，move 不被当成裸斜�
   // 未登录 → 401（仍走登录墙）
   r = await call(mw, '/api/spaces', 'GET');
   assert.equal(r.res.statusCode, 401);
+  closeDB();
+});
+
+test('Space 命名空间：同名文档可分属不同空间，互不覆盖', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('u', 'x', 'member');
+  const def = ensureDefaultSpace(u.id);
+  const work = createSpace(u.id, '工作');
+
+  const a = upsertDoc(u.id, 'notes.md', '默认版', 'notes.md', '# 默认', { spaceId: def.id });
+  const b = upsertDoc(u.id, 'notes.md', '工作版', 'notes.md', '# 工作', { spaceId: work.id });
+
+  assert.notEqual(a.id, b.id, '两空间各建一份，不是同一个 id');
+  assert.equal(b.doc_key, 'notes.md', '目标空间里没有同名，key 保持原样');
+  assert.equal(getDoc(u.id, a.id)!.content, '# 默认', '默认空间那份没被改写');
+  assert.equal(getDoc(u.id, b.id)!.content, '# 工作');
+  assert.equal(listSpaceTree(u.id, def.id).docs.length, 1);
+  assert.equal(listSpaceTree(u.id, work.id).docs.length, 1);
+  assert.equal(getDocByKey(u.id, 'notes.md', work.id)!.id, b.id);
+  assert.equal(getDocByKey(u.id, 'notes.md', def.id)!.id, a.id);
+  closeDB();
+});
+
+test('Space 命名空间：不带 space 且跨空间重名时 409，不静默选一个', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('u', 'x', 'member');
+  const def = ensureDefaultSpace(u.id);
+  const work = createSpace(u.id, '工作');
+  upsertDoc(u.id, 'README.md', 'A', 'README.md', '# A', { spaceId: def.id });
+  upsertDoc(u.id, 'README.md', 'B', 'README.md', '# B', { spaceId: work.id });
+
+  assert.throws(() => getDocByKey(u.id, 'README.md'), is409, '读：跨空间重名要 409');
+  assert.throws(
+    () => upsertDoc(u.id, 'README.md', 'C', 'README.md', '# C'),
+    is409,
+    '写：不带 space_id 且跨空间重名要 409，不能猜着写',
+  );
+  closeDB();
+});
+
+test('Space 命名空间：跨空间搬移撞名自动加 ~2 后缀并回显新 doc_key', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('u', 'x', 'member');
+  const def = ensureDefaultSpace(u.id);
+  const work = createSpace(u.id, '工作');
+  upsertDoc(u.id, 'notes.md', '默认版', 'notes.md', '# 默认', { spaceId: def.id });
+  const inWork = upsertDoc(u.id, 'notes.md', '工作版', 'notes.md', '# 工作', { spaceId: work.id });
+
+  // 把默认空间那份搬到「工作」：目标里已有 notes.md → 应变成 notes~2.md
+  const moved = moveDoc(u.id, getDocByKey(u.id, 'notes.md', def.id)!.id, { space_id: work.id });
+  assert.equal(moved.doc_key, 'notes~2.md');
+  assert.equal(moved.space_id, work.id);
+  assert.equal(getDocByKey(u.id, 'notes~2.md', work.id)!.content, '# 默认', '内容随搬移一起过去');
+  assert.equal(getDocByKey(u.id, 'notes.md', work.id)!.content, '# 工作', '原位那份没被覆盖');
+  assert.equal(listSpaceTree(u.id, work.id).docs.length, 2);
+  closeDB();
+});
+
+test('Space 命名空间：搜索/列表按 space 过滤', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('u', 'x', 'member');
+  const def = ensureDefaultSpace(u.id);
+  const work = createSpace(u.id, '工作');
+  upsertDoc(u.id, 'a.md', '默认里的 a', 'a.md', '正文关键字 zebra', { spaceId: def.id });
+  upsertDoc(u.id, 'a.md', '工作里的 a', 'a.md', '正文关键字 zebra', { spaceId: work.id });
+
+  assert.equal(searchDocs(u.id, 'zebra').length, 2, '不带 space 时全空间');
+  assert.equal(searchDocs(u.id, 'zebra', 50, work.id).length, 1, '带 space 只出该空间');
+  assert.equal(searchDocs(u.id, 'zebra', 50, work.id)[0].title, '工作里的 a');
+  assert.equal(listAllDocs(u.id, def.id).length, 1);
+  assert.equal(listAllDocsFull(u.id, work.id).length, 1);
+  closeDB();
+});
+
+test('默认空间可转移：切换后恒有一个默认，且不可删', () => {
+  const file = tmpDb();
+  initDB(file);
+  const u = createUser('u', 'x', 'member');
+  const def = ensureDefaultSpace(u.id);
+  const work = createSpace(u.id, '工作');
+  setDefaultSpace(u.id, work.id);
+  const spaces = listSpaces(u.id);
+  assert.equal(spaces.filter((s) => s.is_default === 1).length, 1, '只能有一个默认');
+  assert.equal(spaces.find((s) => s.is_default === 1)!.id, work.id);
+  assert.equal(spaces.find((s) => s.id === def.id)!.is_default, 0);
+  assert.throws(() => deleteSpace(u.id, work.id), is400, '默认空间不可删');
   closeDB();
 });
