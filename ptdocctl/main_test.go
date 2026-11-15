@@ -56,3 +56,29 @@ func TestParseGlobalFlags(t *testing.T) {
 		t.Fatal("want error for missing value")
 	}
 }
+
+func TestParseGlobalFlagsSpace(t *testing.T) {
+	// --space 支持 = 连写，且位置任意
+	c, pos, err := parseGlobalFlags([]string{"push", "a.md", "--url", "http://x", "--token", "t", "--space=工作"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.space != "工作" {
+		t.Fatalf("space=%q want 工作", c.space)
+	}
+	if len(pos) != 2 || pos[0] != "push" || pos[1] != "a.md" {
+		t.Fatalf("pos=%v", pos)
+	}
+}
+
+func TestSpaceQueryWithoutSpace(t *testing.T) {
+	// 没给 --space 时不带过滤参数（服务端按默认空间/全部处理）
+	c := &client{}
+	q, err := c.spaceQuery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != "" {
+		t.Fatalf("spaceQuery=%q want empty", q)
+	}
+}

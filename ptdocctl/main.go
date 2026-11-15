@@ -6,6 +6,7 @@
 //	--token <t>     设置页生成的静态 API Token（与登录 Cookie 等价；推荐）
 //	--user <name>   无 Token 时用用户名+密码登录（配合 --pass）
 //	--pass <pw>     同上，密码
+//	--space <s>     空间名或 id；读命令按它过滤，写命令落该空间，缺省落默认空间
 //
 // 子命令：
 //
@@ -47,6 +48,9 @@ type client struct {
 	user   string
 	pass   string
 	cookie string
+	// space 是 --space 的原样值（名字或 id）；spaceID 解析后缓存，0 表示还没解析
+	space   string
+	spaceID int64
 }
 
 // parseGlobalFlags 从任意位置（子命令前后均可）析出 --url/--token/--user/--pass，
@@ -79,6 +83,8 @@ func parseGlobalFlags(argv []string) (*client, []string, error) {
 			c.user = val
 		case "pass":
 			c.pass = val
+		case "space":
+			c.space = val
 		default:
 			return nil, nil, fmt.Errorf("未知参数: --%s", name)
 		}
@@ -90,6 +96,66 @@ func parseGlobalFlags(argv []string) (*client, []string, error) {
 		return nil, nil, fmt.Errorf("缺少 --token（或 --user 与 --pass）")
 	}
 	return c, pos, nil
+}
+
+type spaceRow struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	IsDefault int    `json:"is_default"`
+}
+
+// resolveSpace 把 --space 的名字/id 解析成空间 id；没给 --space 时返回 0（服务端按默认空间处理）。
+// 名字不存在时报错并列出可用空间，避免「拼错了却静默落到默认空间」。
+func (c *client) resolveSpace() (int64, error) {
+	if c.space == "" {
+		return 0, nil
+	}
+	if c.spaceID > 0 {
+		return c.spaceID, nil
+	}
+	b, err := c.do(http.MethodGet, "/api/spaces", nil)
+	if err != nil {
+		return 0, fmt.Errorf("读取空间列表失败: %w", err)
+	}
+	var data struct {
+		Spaces []spaceRow `json:"spaces"`
+	}
+	if err := decode(b, &data); err != nil {
+		return 0, err
+	}
+	if isAllDigits(c.space) {
+		id := int64(0)
+		fmt.Sscan(c.space, &id)
+		for _, s := range data.Spaces {
+			if s.ID == id {
+				c.spaceID = id
+				return id, nil
+			}
+		}
+	}
+	for _, s := range data.Spaces {
+		if strings.EqualFold(s.Name, c.space) {
+			c.spaceID = s.ID
+			return s.ID, nil
+		}
+	}
+	names := make([]string, 0, len(data.Spaces))
+	for _, s := range data.Spaces {
+		names = append(names, s.Name)
+	}
+	return 0, fmt.Errorf("空间「%s」不存在；可用空间：%s", c.space, strings.Join(names, ", "))
+}
+
+// spaceQuery 返回读命令要带的 ?space= 片段（未指定 --space 时为空，即服务端不过滤）。
+func (c *client) spaceQuery() (string, error) {
+	id, err := c.resolveSpace()
+	if err != nil {
+		return "", err
+	}
+	if id == 0 {
+		return "", nil
+	}
+	return "?space=" + fmt.Sprint(id), nil
 }
 
 func trunc(b []byte) string {
@@ -212,7 +278,11 @@ func (c *client) whoami() error {
 }
 
 func (c *client) list() error {
-	b, err := c.do(http.MethodGet, "/api/docs", nil)
+	q, err := c.spaceQuery()
+	if err != nil {
+		return err
+	}
+	b, err := c.do(http.MethodGet, "/api/docs"+q, nil)
 	if err != nil {
 		return err
 	}
@@ -242,7 +312,11 @@ func (c *client) resolve(s string) (*doc, error) {
 		}
 		// 404 等失败不致命：id 形参也可能是纯数字文件名，继续按 doc_key 查。
 	}
-	b, err := c.do(http.MethodGet, "/api/docs", nil)
+	q, err := c.spaceQuery()
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(http.MethodGet, "/api/docs"+q, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +378,16 @@ func (c *client) del(s string) error {
 }
 
 func (c *client) search(q string) error {
-	b, err := c.do(http.MethodGet, "/api/docs?q="+urlQueryEscape(q), nil)
+	params := url.Values{}
+	params.Set("q", q)
+	id, err := c.resolveSpace()
+	if err != nil {
+		return err
+	}
+	if id > 0 {
+		params.Set("space", fmt.Sprint(id))
+	}
+	b, err := c.do(http.MethodGet, "/api/docs?"+params.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -338,16 +421,37 @@ func (c *client) pushOne(path, docKey string) error {
 	if title == "" {
 		title = strings.TrimSuffix(filepath.Base(docKey), ".md")
 	}
-	payload, _ := json.Marshal(map[string]string{
+	body := map[string]any{
 		"doc_key":  docKey,
 		"title":    title,
 		"filename": filepath.Base(docKey),
 		"content":  string(data),
-	})
-	if _, err := c.do(http.MethodPost, "/api/docs", payload); err != nil {
+	}
+	spaceID, err := c.resolveSpace()
+	if err != nil {
 		return err
 	}
-	fmt.Printf("已上传 %s → %s\n", path, docKey)
+	if spaceID > 0 {
+		body["space_id"] = spaceID
+	}
+	payload, _ := json.Marshal(body)
+	res, err := c.do(http.MethodPost, "/api/docs", payload)
+	if err != nil {
+		return err
+	}
+	// 服务端在目标空间撞名时会自动加 ~2，回显最终 key 才不会让人以为推的是原名
+	final := docKey
+	var created struct {
+		DocKey string `json:"doc_key"`
+	}
+	if err := decode(res, &created); err == nil && created.DocKey != "" {
+		final = created.DocKey
+	}
+	if final != docKey {
+		fmt.Printf("已上传 %s → %s（目标空间已有同名，服务端改写为 %s）\n", path, docKey, final)
+		return nil
+	}
+	fmt.Printf("已上传 %s → %s\n", path, final)
 	return nil
 }
 
@@ -406,7 +510,11 @@ func (c *client) pull(dir string) error {
 	if dir == "" {
 		dir = "docs"
 	}
-	b, err := c.do(http.MethodGet, "/api/docs/full", nil)
+	q, err := c.spaceQuery()
+	if err != nil {
+		return err
+	}
+	b, err := c.do(http.MethodGet, "/api/docs/full"+q, nil)
 	if err != nil {
 		return err
 	}

@@ -29,6 +29,7 @@ cd ptdocctl && go build -o /tmp/ptdocctl .
 --token <t>     静态 API Token（推荐），与浏览器 Cookie 等价
 --user <name>   无 Token 时用用户名 + 密码登录
 --pass <pw>     同上
+--space <s>     空间名或 id：读命令按它过滤，写命令落该空间；缺省时读=全部、写=默认空间
 ```
 
 参数可放在子命令前后，也支持 `--token=xxx` 连写。缺 `--url` 或缺认证时直接报错退出，
@@ -52,11 +53,11 @@ C="ptdocctl --url $PTDOC_URL --token $PTDOC_TOKEN"
 | 子命令 | 作用 | 实际请求 | 输出 |
 | --- | --- | --- | --- |
 | `whoami` | 连接与身份自检 | `GET /api/auth/me` | `user=<name> id=<id> role=<role> server=<url>` |
-| `list` | 列出全部文档 | `GET /api/docs` | `id<TAB>doc_key<TAB>标题` |
+| `list` | 列出文档（`--space` 时只列该空间） | `GET /api/docs[?space=]` | `id<TAB>doc_key<TAB>标题` |
 | `get <doc_id\|doc_key>` | 打印全文 | `GET /api/docs` 定位，再 `GET /api/docs/<id>` | 正文原文（无行号、无装饰） |
 | `search <keyword>` | 搜标题/正文 | `GET /api/docs?q=` | `id<TAB>doc_key<TAB>标题` |
-| `pull [dir]` | 全量拉取 | `GET /api/docs/full` | `已写入 <path>` / `共拉取 N 个文档 → <dir>` |
-| `push <file>...` | 上传，doc_key=文件名 | 每个文件 `POST /api/docs` | `已上传 <file> → <doc_key>` |
+| `pull [dir]` | 全量拉取（`--space` 时只拉该空间） | `GET /api/docs/full[?space=]` | `已写入 <path>` / `共拉取 N 个文档 → <dir>` |
+| `push <file>...` | 上传，doc_key=文件名 | 每个文件 `POST /api/docs`（带 `space_id`） | `已上传 <file> → <doc_key>`；被服务端改名时附「服务端改写为 …」 |
 | `pushr <dir>` | 递归上传，doc_key 含子目录 | 同上，串行 | 每行 `已上传 …` + `共上传 N 个文件` |
 | `delete <doc_id\|doc_key>` | 删文档 | 先定位，再 `DELETE /api/docs/<id>` | `已删除 <id><TAB><doc_key>` |
 
@@ -123,3 +124,22 @@ $ ptdocctl … delete cli-test.md
 外面流传的旧版说明写「`delete` 只吃 doc_id，不吃 doc_key」——**当前源码已不是这样**：
 `delete` 会先把形参解析成 id（`ptdocctl/main.go` 的 `resolve`），传 doc_key 或文件名同样可用，
 本轮已实测 `delete cli-test.md` 成功。以本文件为准。
+
+## 空间（Space）
+
+文档按空间隔离：`doc_key` 在**每个空间内**唯一，两个空间可以各有 `README.md`。
+
+```bash
+# 读：只列/只搜该空间
+ptdocctl --url $PTDOC_URL --token $PTDOC_TOKEN --space 工作 list
+ptdocctl --url $PTDOC_URL --token $PTDOC_TOKEN --space 3 search eBPF
+
+# 写：落到该空间；不传 --space 则落默认空间（与旧行为一致）
+ptdocctl --url $PTDOC_URL --token $PTDOC_TOKEN --space 工作 push README.md
+```
+
+- `--space` 接受空间名（忽略大小写）或 id
+- 名字不存在时报错并列出可用空间，不会静默落到默认空间
+- 目标空间已有同名文档 → 在**该空间内**原地更新
+- 目标空间没有、但**别的空间**有这个 key → 服务端自动加 `~2` 后缀新建，CLI 会打印「服务端改写为 …」
+- 不带 `--space` 的读命令仍是全空间（向后兼容）；`get/delete` 若 doc_key 跨空间重名会收到 409，需要带 `--space`
