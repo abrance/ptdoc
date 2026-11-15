@@ -7,6 +7,7 @@
 //	--user <name>   无 Token 时用用户名+密码登录（配合 --pass）
 //	--pass <pw>     同上，密码
 //	--space <s>     空间名或 id；读命令按它过滤，写命令落该空间，缺省落默认空间
+//	--force         push/pull 覆盖前比内容，冲突时强行覆盖（push 先打快照；pull 先另存 .bak-<ts>）
 //
 // 子命令：
 //
@@ -22,6 +23,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type doc struct {
@@ -38,6 +41,7 @@ type doc struct {
 	Title       string `json:"title"`
 	Filename    string `json:"filename"`
 	Content     string `json:"content,omitempty"`
+	ContentSha  string `json:"content_sha256,omitempty"`
 	UpdatedAtMs int64  `json:"updated_at"`
 }
 
@@ -51,6 +55,8 @@ type client struct {
 	// space 是 --space 的原样值（名字或 id）；spaceID 解析后缓存，0 表示还没解析
 	space   string
 	spaceID int64
+	// force：push/pull 冲突时强制覆盖（覆盖前 push 打快照、pull 留 .bak）
+	force bool
 }
 
 // parseGlobalFlags 从任意位置（子命令前后均可）析出 --url/--token/--user/--pass，
@@ -65,6 +71,11 @@ func parseGlobalFlags(argv []string) (*client, []string, error) {
 			continue
 		}
 		name := strings.TrimPrefix(a, "--")
+		// --force 是布尔开关，不取值
+		if name == "force" || name == "force=true" {
+			c.force = true
+			continue
+		}
 		var val string
 		if eq := strings.Index(name, "="); eq >= 0 {
 			val, name = name[eq+1:], name[:eq]
@@ -237,6 +248,7 @@ func usage(w io.Writer) {
   --token <t>     设置页生成的静态 API Token（推荐）
   --user <name>   无 Token 时用用户名+密码登录（配合 --pass）
   --pass <pw>     同上，密码
+  --force         push/pull 覆盖前比内容，冲突时强行覆盖（push 先打快照；pull 先另存 .bak-<ts>）
 
 用法:
   ptdocctl --url <地址> --token <t> <子命令> [参数...]
@@ -405,11 +417,91 @@ func urlQueryEscape(s string) string {
 	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
+// conflict 记录一次「本地与远端都改过」的冲突，供结束时统一列清单。
+type conflict struct {
+	docKey      string
+	localMtime  string
+	remoteMtime string
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%x", sum)
+}
+
+func fileMtime(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "-"
+	}
+	return info.ModTime().Format(time.RFC3339)
+}
+
+func remoteMtime(d *doc) string {
+	if d == nil || d.UpdatedAtMs <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(d.UpdatedAtMs).Format(time.RFC3339)
+}
+
+// findRemote 按 doc_key 在目标空间精确查现有文档（含 content_sha256）；不存在返回 (nil,nil)。
+func (c *client) findRemote(docKey string) (*doc, error) {
+	q, err := c.spaceQuery()
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(http.MethodGet, "/api/docs"+q, nil)
+	if err != nil {
+		return nil, err
+	}
+	var docs []doc
+	if err := decode(b, &docs); err != nil {
+		return nil, err
+	}
+	for _, d := range docs {
+		if d.DocKey != docKey {
+			continue
+		}
+		full, err := c.do(http.MethodGet, fmt.Sprintf("/api/docs/%d", d.ID), nil)
+		if err != nil {
+			return nil, err
+		}
+		var fd doc
+		if err := decode(full, &fd); err != nil {
+			return nil, err
+		}
+		return &fd, nil
+	}
+	return nil, nil
+}
+
+// snapshot 覆盖前给远端文档打一条手动快照（复用服务端已有 createSnapshot）。
+func (c *client) snapshot(id int64, label string) error {
+	body, _ := json.Marshal(map[string]any{"label": label})
+	_, err := c.do(http.MethodPost, fmt.Sprintf("/api/docs/%d/snapshots", id), body)
+	return err
+}
+
+func remoteSha(d *doc) string {
+	if d == nil {
+		return ""
+	}
+	if d.ContentSha != "" {
+		return d.ContentSha
+	}
+	if d.Content != "" {
+		return sha256Hex([]byte(d.Content))
+	}
+	return ""
+}
+
 // pushOne 上传单个文件。docKey 为空时取文件名；title 取 md 首个 # 标题，空则用文件名。
-func (c *client) pushOne(path, docKey string) error {
+// 覆盖前比内容：远端不存在 → 新建；内容一致 → 跳过（不写，updated_at 不变）；
+// 不一致 → 非 --force 时记冲突不写，--force 时先打快照再覆盖。返回是否真的写了服务端。
+func (c *client) pushOne(path, docKey string, conflicts *[]conflict) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if docKey == "" {
 		docKey = filepath.Base(path)
@@ -417,6 +509,26 @@ func (c *client) pushOne(path, docKey string) error {
 	if !strings.HasSuffix(strings.ToLower(docKey), ".md") {
 		docKey += ".md"
 	}
+	localSha := sha256Hex(data)
+
+	existing, err := c.findRemote(docKey)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		if remoteSha(existing) == localSha {
+			fmt.Printf("未改动 %s → %s（内容一致，跳过）\n", path, docKey)
+			return false, nil
+		}
+		if !c.force {
+			*conflicts = append(*conflicts, conflict{docKey: docKey, localMtime: fileMtime(path), remoteMtime: remoteMtime(existing)})
+			return false, nil
+		}
+		if err := c.snapshot(existing.ID, "ptdocctl push --force 覆盖前快照"); err != nil {
+			return false, fmt.Errorf("创建快照失败: %w", err)
+		}
+	}
+
 	title := strings.TrimPrefix(strings.TrimSpace(firstH1(string(data))), "# ")
 	if title == "" {
 		title = strings.TrimSuffix(filepath.Base(docKey), ".md")
@@ -429,7 +541,7 @@ func (c *client) pushOne(path, docKey string) error {
 	}
 	spaceID, err := c.resolveSpace()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if spaceID > 0 {
 		body["space_id"] = spaceID
@@ -437,7 +549,7 @@ func (c *client) pushOne(path, docKey string) error {
 	payload, _ := json.Marshal(body)
 	res, err := c.do(http.MethodPost, "/api/docs", payload)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// 服务端在目标空间撞名时会自动加 ~2，回显最终 key 才不会让人以为推的是原名
 	final := docKey
@@ -449,10 +561,10 @@ func (c *client) pushOne(path, docKey string) error {
 	}
 	if final != docKey {
 		fmt.Printf("已上传 %s → %s（目标空间已有同名，服务端改写为 %s）\n", path, docKey, final)
-		return nil
+		return true, nil
 	}
 	fmt.Printf("已上传 %s → %s\n", path, final)
-	return nil
+	return true, nil
 }
 
 // firstH1 返回第一处行首 "# " 行（保持简单：不处理 front-matter）。
@@ -466,13 +578,27 @@ func firstH1(s string) string {
 	return ""
 }
 
+// reportConflicts 打印冲突清单；有冲突则返回非 nil 错误让进程退出码非 0。
+func reportConflicts(cs []conflict) error {
+	if len(cs) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "检测到 %d 个内容冲突（本地与远端都改过），未覆盖：\n", len(cs))
+	for _, cf := range cs {
+		fmt.Fprintf(os.Stderr, "  %s\t本地 %s\t远端 %s\n", cf.docKey, cf.localMtime, cf.remoteMtime)
+	}
+	fmt.Fprintln(os.Stderr, "确认要覆盖请加 --force")
+	return fmt.Errorf("检测到 %d 个内容冲突，已中止", len(cs))
+}
+
 func (c *client) push(files []string) error {
+	var conflicts []conflict
 	for _, f := range files {
-		if err := c.pushOne(f, ""); err != nil {
+		if _, err := c.pushOne(f, "", &conflicts); err != nil {
 			return fmt.Errorf("push %s: %w", f, err)
 		}
 	}
-	return nil
+	return reportConflicts(conflicts)
 }
 
 func (c *client) pushr(dir string) error {
@@ -493,16 +619,25 @@ func (c *client) pushr(dir string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("%s 下没有 .md 文件", dir)
 	}
+	var conflicts []conflict
+	written := 0
 	for _, f := range files {
 		rel, err := filepath.Rel(dir, f)
 		if err != nil {
 			return err
 		}
-		if err := c.pushOne(f, rel); err != nil {
+		wrote, err := c.pushOne(f, rel, &conflicts)
+		if err != nil {
 			return fmt.Errorf("push %s: %w", f, err)
 		}
+		if wrote {
+			written++
+		}
 	}
-	fmt.Printf("共上传 %d 个文件\n", len(files))
+	if err := reportConflicts(conflicts); err != nil {
+		return err
+	}
+	fmt.Printf("共处理 %d 个文件，实际上传 %d 个\n", len(files), written)
 	return nil
 }
 
@@ -522,6 +657,7 @@ func (c *client) pull(dir string) error {
 	if err := decode(b, &docs); err != nil {
 		return err
 	}
+	var conflicts []conflict
 	for _, d := range docs {
 		key := filepath.FromSlash(d.DocKey)
 		if strings.HasPrefix(key, "/") || strings.Contains(key, "..") {
@@ -532,6 +668,23 @@ func (c *client) pull(dir string) error {
 		if !strings.HasSuffix(strings.ToLower(p), ".md") {
 			p += ".md"
 		}
+		remote := remoteSha(&d)
+		if local, err := os.ReadFile(p); err == nil {
+			if sha256Hex(local) == remote {
+				fmt.Printf("未改动 %s（内容一致，跳过）\n", p)
+				continue
+			}
+			if !c.force {
+				conflicts = append(conflicts, conflict{docKey: d.DocKey, localMtime: fileMtime(p), remoteMtime: remoteMtime(&d)})
+				continue
+			}
+			// --force：覆盖前把本地另存 .bak-<ts>
+			bak := fmt.Sprintf("%s.bak-%d", p, time.Now().Unix())
+			if err := os.WriteFile(bak, local, 0o644); err != nil {
+				return err
+			}
+			fmt.Printf("已备份 %s\n", bak)
+		}
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
@@ -539,6 +692,9 @@ func (c *client) pull(dir string) error {
 			return err
 		}
 		fmt.Printf("已写入 %s\n", p)
+	}
+	if err := reportConflicts(conflicts); err != nil {
+		return err
 	}
 	fmt.Printf("共拉取 %d 个文档 → %s\n", len(docs), dir)
 	return nil
