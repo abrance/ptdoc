@@ -6,6 +6,8 @@ export interface RetrievedHit {
   snippet: string;
   score: number;
   source?: string;
+  /** 稳定文档标识（doc_key）。向量结果来自 payload.doc_key，本地全文结果来自 DocSummary.doc_key，用于跨两路去重。 */
+  doc_key?: string;
 }
 
 export interface QdrantQueryPoint {
@@ -59,6 +61,7 @@ export function mapQdrantPoints(points: QdrantQueryPoint[]): RetrievedHit[] {
       snippet: pickSnippet(payload),
       score: typeof p.score === 'number' ? p.score : 0,
       source: typeof payload.source === 'string' ? payload.source : typeof payload.url === 'string' ? payload.url : undefined,
+      doc_key: typeof payload.doc_key === 'string' ? payload.doc_key : undefined,
     };
   });
 }

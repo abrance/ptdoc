@@ -466,6 +466,7 @@ test('历史含 assistant 回复时不抛 content.flatMap 错误（线上回归�
 // ─── FR-33：qa 场景有/无 Qdrant 两条检索路径 ───
 import { listAllDocs, upsertQdrantProfile } from './db.ts';
 import { setQdrantQueryForTests } from './qdrant-retriever.ts';
+import { pointId } from './qdrant-upsert.ts';
 
 test('FR-33 无 Qdrant：search_knowledge 走本地全文检索，返回命中文档 id 与摘录', async () => {
   const { userId } = setupDb();
@@ -539,6 +540,53 @@ test('FR-33 配了 Qdrant：search_knowledge 走向量检索，两路合并去�
     // 配了 Qdrant 时不算兜底
     assert.notEqual(result!.retrievalFallback, true);
     assert.ok(result!.spans.some((s) => s.name === 'search_knowledge' && s.detail === String(payload.length)));
+  } finally {
+    setQdrantQueryForTests(null);
+    mockServer?.close();
+    mockServer = null;
+    setChatRunnerForTests(null);
+  }
+});
+
+// 真实 Qdrant 点 id 是 pointId() 生成的 UUID，与本地全文结果的 id（SQLite 行号）永不相等，
+// 只能靠 doc_key 去重。这里用真实 id 形状 + 同篇本地命中，断言整篇只出现一次且向量独有 chunk 不被误删。
+test('FR-33 配了 Qdrant：真实 UUID 点 id 下按 doc_key 去重，向量独有 chunk 保留', async () => {
+  const { userId } = setupDb();
+  setChatRunnerForTests(null);
+  seenRequests.length = 0;
+  const port = await startMock();
+  upsertLlmProfile(userId, `http://127.0.0.1:${port}/v1`, encryptSecret('sk'), 'fake-model', 'off');
+  upsertQdrantProfile(userId, 'http://q', null, 'col', null, 5);
+  const hitDoc = listAllDocs(userId)[0];
+  assert.ok(hitDoc, 'setupDb 应已建一篇文档');
+  // 同一篇文档的两个向量 chunk，点 id 用真实 UUID 形状；title 回退到 path，不带正文关键词，确保本地全文也能命中该篇
+  setQdrantQueryForTests(async () => [
+    { id: pointId(userId, hitDoc.doc_key, 0), score: 0.95, payload: { path: 'A.md', doc_key: hitDoc.doc_key, chunk_index: 0 } },
+    { id: pointId(userId, hitDoc.doc_key, 1), score: 0.90, payload: { path: 'A.md', doc_key: hitDoc.doc_key, chunk_index: 1 } },
+  ]);
+  mockResponses = [
+    [toolFrame('search_knowledge', '{"query":"正文A"}')],
+    [textFrame('答案 [1][2]', 'stop', { prompt_tokens: 4, completion_tokens: 2 })],
+  ];
+  try {
+    const gen = runChat({ userId, scene: 'qa', messages: [], input: '正文A 是什么', abort: new AbortController().signal });
+    let result: ChatRunResult | undefined;
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) { result = r.value; break; }
+    }
+    const toolMsg = seenRequests[1].messages.find((m: any) => m.role === 'tool' || m.role === 'toolResult');
+    const toolRaw = typeof toolMsg.content === 'string' ? toolMsg.content : toolMsg.content[0].text;
+    const payload: Array<{ id: string; doc_key?: string }> = JSON.parse(String(toolRaw));
+    const chunk0 = pointId(userId, hitDoc.doc_key, 0);
+    const chunk1 = pointId(userId, hitDoc.doc_key, 1);
+    const ids = payload.map((p) => p.id);
+    // 向量两个 chunk 都保留（向量独有 chunk 不被误删）
+    assert.ok(ids.includes(chunk0) && ids.includes(chunk1), '同一篇的两个向量 chunk 都应保留');
+    // 本地整篇命中（id = SQLite 行号）按 doc_key 被剔除，不会多出一条重复引用
+    assert.ok(!ids.includes(String(hitDoc.id)), '本地同篇整篇命中应被剔除');
+    assert.equal(payload.length, 2, '合并结果应只剩该篇两个向量 chunk');
+    assert.notEqual(result!.retrievalFallback, true);
   } finally {
     setQdrantQueryForTests(null);
     mockServer?.close();

@@ -188,6 +188,7 @@ function searchDocsToHits(userId: number, query: string, limit = 8): RetrievedHi
     snippet: buildSnippet(userId, d.id, q),
     score: 0,
     source: d.doc_key,
+    doc_key: d.doc_key,
   }));
 }
 
@@ -201,13 +202,27 @@ function buildSnippet(userId: number, docId: number, q: string, span = 120): str
   return doc.content.slice(start, start + span).trim();
 }
 
-/** 合并两路检索结果并去重（按 hit.id）；先出现的优先。 */
+/**
+ * 合并两路检索结果去重。
+ * - 向量 chunks 全部保留（同一篇文档的多 chunk 合法）；
+ * - 本地整篇命中若 doc_key 已出现在向量结果里，则剔除（向量已覆盖该篇）；
+ * - 两边都没有 doc_key 时回退按 id 去重，避免重复引用。
+ */
 function mergeHits(a: RetrievedHit[], b: RetrievedHit[]): RetrievedHit[] {
-  const seen = new Set<string>();
+  const seenIds = new Set<string>();
+  const vecDocKeys = new Set<string>();
   const out: RetrievedHit[] = [];
-  for (const h of [...a, ...b]) {
-    if (seen.has(h.id)) continue;
-    seen.add(h.id);
+  for (const h of a) {
+    const idKey = 'id:' + h.id;
+    if (seenIds.has(idKey)) continue;
+    seenIds.add(idKey);
+    if (h.doc_key) vecDocKeys.add(h.doc_key);
+    out.push(h);
+  }
+  for (const h of b) {
+    if (h.doc_key && vecDocKeys.has(h.doc_key)) continue; // 向量已覆盖整篇，剔除本地整篇命中
+    if (seenIds.has('id:' + h.id)) continue; // 无 doc_key 或真实重复时按 id 兜底
+    seenIds.add('id:' + h.id);
     out.push(h);
   }
   return out;
