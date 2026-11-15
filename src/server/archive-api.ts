@@ -9,6 +9,7 @@ import {
   listArchive,
   listArchiveItems,
   listArtifacts,
+  listAllArtifactKeys,
   markArtifactDeleted,
   resolveDocRef,
   rotateDocArchiveToken,
@@ -17,7 +18,8 @@ import {
 import { archiveDoc, getArchiveStorage, LOCAL_ARCHIVE_PREFIX, readLocalArchiveObject } from './archive.ts';
 import { buildShareHtmlDoc } from '../core/share-html.ts';
 import { optionalUserStorage } from './storage.ts';
-import { resignPrivateUrls } from './qiniu-uploader.ts';
+import { resignPrivateUrls, listQiniuKeys } from './qiniu-uploader.ts';
+import { requireUserStorage } from './storage.ts';
 import { requireUser } from './auth.ts';
 import { DOC_KEY_PATH_ERROR, HttpError, hasBareDocKeySlash, readJson, sendJson } from './http.ts';
 import type { ArtifactRow } from './db.ts';
@@ -162,6 +164,39 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
           items: items.map((i) => ({ ...i, public_url: `/a/${i.token}` })),
           entries,
           folders,
+        });
+      }
+
+      // FR-34：孤儿产物对账。默认只列不吃（dry-run），?apply=1 才真删。
+      // 删文档只删记录不动对象，所以 key 一旦丢就再也无法反推 —— 这里按桶里实际对象对账。
+      if (/^\/api\/archive\/orphans(\?|$)/.test(url) && method === 'GET') {
+        const apply = new URL(url, 'http://localhost').searchParams.get('apply') === '1';
+        const storage = getArchiveStorage(uid);
+        if (storage.kind !== 'qiniu') {
+          throw new HttpError(400, '孤儿清理只支持七牛存储；本机 local 存储的产物请直接删目录');
+        }
+        const referenced = listAllArtifactKeys(uid);
+        const inBucket = await listQiniuKeys(requireUserStorage(uid), 'archive/');
+        const orphans = inBucket.filter((k) => !referenced.has(k));
+        const deleted: string[] = [];
+        const warnings: Array<{ key: string; reason: string }> = [];
+        if (apply) {
+          for (const key of orphans) {
+            try {
+              await storage.delete(key);
+              deleted.push(key);
+            } catch (e) {
+              warnings.push({ key, reason: (e as Error).message });
+            }
+          }
+        }
+        return sendJson(res, 200, {
+          scanned: inBucket.length,
+          referenced: referenced.size,
+          orphans,
+          deleted: apply ? deleted : undefined,
+          warnings: apply ? warnings : undefined,
+          applied: apply,
         });
       }
 

@@ -43,6 +43,7 @@ import {
   updateSkill,
 } from './extension-store.ts';
 import { newTraceId, runChat } from './agent-runtime.ts';
+import { probeLlm, probeQdrant } from './agent-probe.ts';
 
 const aborts = new Map<string, AbortController>();
 /** steer 队列：流式期间 POST chat 的追问入这里，由进行中的 runChat 消费（FR-10） */
@@ -188,6 +189,22 @@ async function handleUser(
     return sendJson(res, 200, { base_url: baseUrl, model, thinking_level: thinkingLevel, secret_configured: true });
   }
 
+  if (path === '/api/agents/llm/probe' && req.method === 'POST') {
+    // 用请求里的表单值探测（改了没保存也能测），不落库
+    const b = await readJson(req).catch(() => ({}) as any);
+    const existing = getLlmProfile(uid);
+    const baseUrl = String(b.base_url || existing?.base_url || '').trim();
+    const model = String(b.model || existing?.model || '').trim();
+    const keyBody = typeof b.api_key === 'string' ? b.api_key.trim() : '';
+    const apiKey = keyBody || (existing ? decryptSecret(existing.api_key_enc) : '');
+    if (!baseUrl || !model || !apiKey) {
+      const miss = [!baseUrl && 'Base URL', !model && '模型名', !apiKey && 'API Key'].filter(Boolean).join(' / ');
+      return sendJson(res, 200, { ok: false, status: 0, detail: '', hint: `还没配置：缺 ${miss}` });
+    }
+    const r = await probeLlm({ baseUrl, apiKey, model, thinkingLevel: String(b.thinking_level || '') });
+    return sendJson(res, 200, r);
+  }
+
   if (path === '/api/agents/qdrant' && req.method === 'GET') {
     const row = getQdrantProfile(uid);
     return sendJson(res, 200, {
@@ -216,6 +233,26 @@ async function handleUser(
       top_k: clampTopK(b.top_k),
       secret_configured: !!enc,
     });
+  }
+
+  if (path === '/api/agents/qdrant/probe' && req.method === 'POST') {
+    const b = await readJson(req).catch(() => ({}) as any);
+    const existing = getQdrantProfile(uid);
+    const url = String(b.url || existing?.url || '').trim();
+    const collection = String(b.collection || existing?.collection || '').trim();
+    const keyBody = typeof b.api_key === 'string' ? b.api_key.trim() : '';
+    const apiKey = keyBody || (existing?.api_key_enc ? decryptSecret(existing.api_key_enc) : undefined);
+    if (!url || !collection) {
+      const miss = [!url && 'URL', !collection && 'Collection'].filter(Boolean).join(' / ');
+      return sendJson(res, 200, { ok: false, status: 0, detail: '', hint: `还没配置：缺 ${miss}` });
+    }
+    const r = await probeQdrant({
+      url,
+      collection,
+      apiKey,
+      vectorName: String(b.vector_name || existing?.vector_name || '') || null,
+    });
+    return sendJson(res, 200, r);
   }
 
   if (path === '/api/agents/extensions' && req.method === 'GET') {

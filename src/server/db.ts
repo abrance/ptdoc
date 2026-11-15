@@ -1497,6 +1497,22 @@ export function listArtifacts(
   return getDb().prepare(sql).all(userId, docKey) as unknown as ArtifactRow[];
 }
 
+/**
+ * 该用户所有归档产物的对象 key（含已删除状态：记录删了但对象可能还在桶里）。
+ * 孤儿对账要的是「桶里有、库中无」，所以这里必须把 deleted 行也算作已引用。
+ */
+export function listAllArtifactKeys(userId: number): Set<string> {
+  const rows = getDb()
+    .prepare('SELECT md_key, html_key FROM shares WHERE user_id=?')
+    .all(userId) as Array<{ md_key: string | null; html_key: string | null }>;
+  const keys = new Set<string>();
+  for (const r of rows) {
+    if (r.md_key) keys.add(r.md_key);
+    if (r.html_key) keys.add(r.html_key);
+  }
+  return keys;
+}
+
 export function findDocByArchiveToken(token: string): DocRow | undefined {
   if (!token) return undefined;
   return getDb().prepare('SELECT * FROM docs WHERE archive_token=?').get(token) as unknown as
