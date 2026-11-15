@@ -77,3 +77,26 @@ test('buildExportZip：解压后每篇 md 与库内 content 字节一致（端�
   assert.ok(files.includes('archive-urls.csv'));
   closeDB();
 });
+
+test('buildExportEntries：doc_key 与保留名 INDEX.md / archive-urls.csv 冲突时，用户内容不被覆盖（带后缀保留）', () => {
+  const docs = [
+    { id: 1, doc_key: 'INDEX.md', title: '用户索引', updated_at: 1000, content: '用户 INDEX 内容' },
+    { id: 2, doc_key: 'archive-urls.csv', title: '用户CSV', updated_at: 2000, content: '用户 CSV 内容' },
+    { id: 3, doc_key: 'normal.md', title: 'N', updated_at: 3000, content: 'N body' },
+  ];
+  const { entries, docCount } = buildExportEntries(docs);
+  assert.equal(docCount, 3);
+  // 生成文件保持原名、内容不被用户文档覆盖
+  assert.match(entries['INDEX.md'], /# 文档导出索引/);
+  assert.ok(entries['archive-urls.csv'].startsWith('doc_key,archive_url'));
+  // 与生成物同名的用户文档走 ~<id> 后缀，内容原样可读回
+  assert.equal(entries['INDEX~1.md'], '用户 INDEX 内容');
+  // archive-urls.csv 作为文档会补 .md（archive-urls.csv.md），自成一文件，不覆盖生成的 csv
+  assert.equal(entries['archive-urls.csv.md'], '用户 CSV 内容');
+  assert.equal(entries['normal.md'], 'N body');
+  // 每篇用户文档都各有一个落盘文件（排除两个生成物），数量与 docCount 一致
+  const userFiles = Object.keys(entries).filter(
+    (k) => k !== 'INDEX.md' && k !== 'archive-urls.csv',
+  );
+  assert.equal(userFiles.length, docCount, 'docCount 应等于用户文档落盘文件数');
+});

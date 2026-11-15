@@ -69,7 +69,8 @@ export interface ExportEntries {
  */
 export function buildExportEntries(docs: ExportDoc[]): ExportEntries {
   const entries: Record<string, string> = {};
-  const used = new Set<string>();
+  // 预占生成文件名，避免同名用户文档被 INDEX.md / archive-urls.csv 无条件覆盖（静默丢文档）
+  const used = new Set<string>(['INDEX.md', 'archive-urls.csv']);
   const rows: Array<{ title: string; path: string; updated: string; archive: string }> = [];
   const csv = ['doc_key,archive_url'];
 
