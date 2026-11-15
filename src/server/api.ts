@@ -58,6 +58,7 @@ import {
 } from './db.ts';
 import { parseStorageInput, saveVerifiedProfile, selfCheckPrivateBucket, toPublicProfile, verifyConnectivity } from './storage.ts';
 import { syncArchiveToQdrant } from './archive-qdrant.ts';
+import { buildExportZip } from './export-zip.ts';
 
 /** 私有空间下库里的图片链接是上传当时签的，输出前现签一遍（公开空间原样返回）。 */
 function freshUrls(userId: number, text: string): string {
@@ -313,6 +314,17 @@ export function apiMiddleware(): Connect.NextHandleFunction {
           200,
           listAllDocsFull(uid, space).map((d) => ({ ...d, content_sha256: sha256Content(d.content) })),
         );
+      }
+      // FR-29 全站 Markdown 一键导出：全部 docs 的 .md + INDEX.md + archive-urls.csv，打成 store zip
+      if (url === '/api/docs/export.zip' && req.method === 'GET') {
+        const space = parseSpaceFilter(uid, new URL(url, 'http://localhost').searchParams.get('space'));
+        const zip = buildExportZip(listAllDocsFull(uid, space));
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="ptdoc-export.zip"');
+        res.setHeader('Content-Length', String(zip.length));
+        res.end(zip);
+        return;
       }
       if (url.startsWith('/api/docs/') && url.endsWith('/rename') && req.method === 'POST') {
         const id = Number(url.slice('/api/docs/'.length).split('/')[0]);
