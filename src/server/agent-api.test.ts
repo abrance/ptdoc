@@ -114,7 +114,7 @@ test('无 LLM Profile 时 chat 返回 400', async () => {
   closeDB();
 });
 
-test('qa 场景无 Qdrant Profile 返回 400', async () => {
+test('qa 场景无 Qdrant Profile 不再 400：走全文检索兜底并在回答前给提示（FR-33）', async () => {
   boot();
   const u = createUser('alice', hashPassword('password1'), 'member');
   upsertLlmProfile(u.id, 'http://llm', encryptSecret('sk'), 'm');
@@ -126,8 +126,29 @@ test('qa 场景无 Qdrant Profile 返回 400', async () => {
     token: tok,
     body: { input: 'hi' },
   });
+  assert.equal(r.status, 200, '无 Qdrant 也应能答');
+  assert.match(r.text, /未配置向量库，已用本地全文检索/);
+  assert.match(r.text, /text-delta/);
+  // 落库正文也带提示，和用户看到的一致
+  const detail = await call({ method: 'GET', url: `/api/agents/conversations/${conv.json.id}`, token: tok });
+  const turn = detail.json.turns.find((t: any) => t.role === 'assistant');
+  assert.match(turn.content, /未配置向量库/);
+  closeDB();
+});
+
+test('qa 场景未配 LLM 仍 400（FR-33 保留）', async () => {
+  boot();
+  const u = createUser('alice', hashPassword('password1'), 'member');
+  const tok = tokenFor(u.id);
+  const conv = await call({ method: 'POST', url: '/api/agents/conversations', token: tok, body: { scene: 'qa' } });
+  const r = await call({
+    method: 'POST',
+    url: `/api/agents/conversations/${conv.json.id}/chat`,
+    token: tok,
+    body: { input: 'hi' },
+  });
   assert.equal(r.status, 400);
-  assert.match(r.json.error, /Qdrant/);
+  assert.match(r.json.error, /大模型/);
   closeDB();
 });
 

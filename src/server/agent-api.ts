@@ -413,9 +413,10 @@ async function handleChat(
   const conv = getAgentConversation(uid, cid);
   if (!conv) throw new HttpError(403, '权限不足');
   if (!getLlmProfile(uid)) throw new HttpError(400, '请先在设置中填写大模型 Base URL、API Key 与模型名');
-  if (conv.scene === 'qa' && !getQdrantProfile(uid)) {
-    throw new HttpError(400, '请先在设置中填写 Qdrant URL 与 collection');
-  }
+  // FR-33：qa 不再硬依赖 Qdrant；未配置时 search_knowledge 退化为本地全文检索，回答前明确告知。
+  // 未配置 LLM 仍在上方 400。
+  const fallbackNote =
+    conv.scene === 'qa' && !getQdrantProfile(uid) ? '（未配置向量库，已用本地全文检索，结果偏保守）\n\n' : '';
   const b = bodyOverride ?? (await readJson(req));
   const input = String(b.input || '').trim();
   if (!input) throw new HttpError(400, '输入不能为空');
@@ -441,6 +442,8 @@ async function handleChat(
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  // 兜底提示先于正文流式下发，用户看到的第一行就是这句
+  if (fallbackNote) writeSse(res, { type: 'text-delta', delta: fallbackNote });
 
   const t0 = Date.now();
   let out;
@@ -472,6 +475,8 @@ async function handleChat(
   const aborted = ac.signal.aborted;
   // 失败判定：异常 > 流内 error 事件（不依赖 runner return 契约）> return 值的 errorText
   const errorText = failed || streamError || (out as { errorText?: string }).errorText || null;
+  // 落库正文与用户所见一致：补上已下发的兜底提示
+  if (fallbackNote && out.text && !errorText) out.text = fallbackNote + out.text;
   const traceId = newTraceId();
   const assistant = insertAgentTurn({
     conversation_id: cid,
