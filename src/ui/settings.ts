@@ -126,7 +126,8 @@ export function initSettingsPanel(opts: {
           </select>
         </label>
         <label>API Key<input name="llm_api_key" type="password" autocomplete="off" /></label>
-        <div class="settings-ops"><button type="button" id="llm-save" class="btn-primary">保存大模型</button></div>
+        <div class="settings-ops"><button type="button" id="llm-save" class="btn-primary">保存大模型</button><button type="button" id="llm-probe">测试连接</button></div>
+        <p class="settings-hint" id="llm-probe-hint"></p>
       </form>`;
     body('qdrant').innerHTML = `
       <form id="qdrant-form" class="settings-form">
@@ -136,7 +137,8 @@ export function initSettingsPanel(opts: {
         <label>Vector 名（可选）<input name="qdrant_vector" /></label>
         <label>top-k<input name="qdrant_topk" type="number" min="1" max="20" value="5" /></label>
         <label>API Key<input name="qdrant_api_key" type="password" autocomplete="off" /></label>
-        <div class="settings-ops"><button type="button" id="qdrant-save" class="btn-primary">保存知识库</button></div>
+        <div class="settings-ops"><button type="button" id="qdrant-save" class="btn-primary">保存知识库</button><button type="button" id="qdrant-probe">测试连接</button></div>
+        <p class="settings-hint" id="qdrant-probe-hint"></p>
       </form>`;
     body('retention').innerHTML = retentionSectionHtml();
     body('password').innerHTML = `
@@ -162,7 +164,9 @@ export function initSettingsPanel(opts: {
     document.getElementById('storage-selfcheck')!.addEventListener('click', () => void selfCheck());
     document.getElementById('password-save')!.addEventListener('click', () => void changePassword());
     document.getElementById('llm-save')!.addEventListener('click', () => void saveLlm());
+    document.getElementById('llm-probe')!.addEventListener('click', () => void probe('llm'));
     document.getElementById('qdrant-save')!.addEventListener('click', () => void saveQdrant());
+    document.getElementById('qdrant-probe')!.addEventListener('click', () => void probe('qdrant'));
     document.getElementById('api-token-save')!.addEventListener('click', () => void saveApiToken());
     document.getElementById('api-token-clear')!.addEventListener('click', () => void clearApiToken());
     (document.getElementById('settings-form') as HTMLFormElement).addEventListener('submit', (e) => {
@@ -351,6 +355,55 @@ export function initSettingsPanel(opts: {
     if (!res.ok) return opts.onStatus(j.error || '保存失败', true);
     opts.onStatus('知识库配置已保存');
     await fillQdrant();
+  };
+
+  /** FR-30 测试连接：用表单当前值探测（未保存也能测），结果就地显示，不弹 toast。 */
+  const probe = async (kind: 'llm' | 'qdrant'): Promise<void> => {
+    const hint = document.getElementById(`${kind}-probe-hint`) as HTMLElement;
+    const btn = document.getElementById(`${kind}-probe`) as HTMLButtonElement;
+    const form = document.getElementById(`${kind}-form`) as HTMLFormElement;
+    const body: Record<string, unknown> =
+      kind === 'llm'
+        ? {
+            base_url: (form.elements.namedItem('llm_base_url') as HTMLInputElement).value,
+            model: (form.elements.namedItem('llm_model') as HTMLInputElement).value,
+            thinking_level: (form.elements.namedItem('llm_thinking') as HTMLSelectElement).value,
+            api_key: (form.elements.namedItem('llm_api_key') as HTMLInputElement).value.trim() || undefined,
+          }
+        : {
+            url: (form.elements.namedItem('qdrant_url') as HTMLInputElement).value,
+            collection: (form.elements.namedItem('qdrant_collection') as HTMLInputElement).value,
+            vector_name: (form.elements.namedItem('qdrant_vector') as HTMLInputElement).value,
+            api_key: (form.elements.namedItem('qdrant_api_key') as HTMLInputElement).value.trim() || undefined,
+          };
+    hint.textContent = '测试中…';
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/agents/${kind}/probe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = (await res.json()) as {
+        ok?: boolean;
+        status?: number;
+        detail?: string;
+        hint?: string;
+        raw?: string;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+      if (j.ok) {
+        hint.textContent = `✓ ${j.detail || '可用'}`;
+      } else {
+        const status = j.status ? `HTTP ${j.status}：` : '';
+        hint.textContent = `✗ ${status}${j.hint || '不可用'}${j.raw ? '（' + j.raw + '）' : ''}`;
+      }
+    } catch (e) {
+      hint.textContent = '✗ 测试失败：' + (e as Error).message;
+    } finally {
+      btn.disabled = false;
+    }
   };
 
   const changePassword = async (): Promise<void> => {
