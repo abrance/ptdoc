@@ -5,6 +5,16 @@
 import { askConfirm, askNote } from './dialog.ts';
 import { showToast } from './toast.ts';
 import { emptyStateHtml } from './list-state.ts';
+import {
+  getCurrentSpaceId,
+  loadSpaces,
+  onSpaceChanged,
+  readScope,
+  scopeQuery,
+  scopeSelectHtml,
+  syncScopeLabel,
+  type SpaceLite,
+} from './space-scope.ts';
 
 export interface ArchiveStatus {
   stale: boolean;
@@ -56,6 +66,9 @@ export interface ArchiveItem {
   history_count: number;
   /** 归档 Markdown 的知识库同步状态；由 entries[] 合并而来，缺失时显示「未同步」。 */
   qdrant_sync?: QdrantSyncStatus;
+  /** 归属空间：搜「全部空间」时按它分组 */
+  space_id?: number | null;
+  space_name?: string | null;
 }
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -436,7 +449,21 @@ export async function refreshArchiveList(q = ''): Promise<void> {
   const seq = ++listSeq;
   if (!list.dataset.rendered) list.innerHTML = '<li class="ar-empty">加载中…</li>';
   try {
-    const url = '/api/archive' + (q ? '?q=' + encodeURIComponent(q) : '');
+    if (!archiveScopeEl) {
+      // 列表先于初始化被调用（例如别处主动 refresh）时，先把下拉建出来
+      archiveSpaces = await loadSpaces();
+      const slot = $('archive-scope-slot');
+      slot.innerHTML = scopeSelectHtml('archive-scope', archiveSpaces, getCurrentSpaceId());
+      archiveScopeEl = slot.querySelector<HTMLSelectElement>('#archive-scope');
+      archiveScopeEl?.addEventListener('change', () =>
+        void refreshArchiveList(($('archive-search') as HTMLInputElement).value.trim()),
+      );
+    }
+    const scope = archiveScopeEl ? readScope(archiveScopeEl) : 'all';
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (scope !== 'all') params.set('space', String(scope));
+    const url = '/api/archive' + (params.toString() ? '?' + params.toString() : '');
     const res = await fetch(url);
     const data = await readJson<{ items: ArchiveItem[]; entries?: ArchiveEntrySync[] }>(res);
     if (seq !== listSeq) return;
@@ -453,11 +480,10 @@ export async function refreshArchiveList(q = ''): Promise<void> {
           );
       return;
     }
-    list.innerHTML = items
-      .map(
-        (it) => `<li class="ar-row" data-id="${it.doc_id}" data-key="${esc(it.doc_key || '')}" data-token="${esc(
-          it.token || '',
-        )}" data-public-url="${esc(it.public_url || (it.token ? '/a/' + it.token : ''))}">
+    const rowHtml = (it: ArchiveItem): string =>
+      `<li class="ar-row" data-id="${it.doc_id}" data-key="${esc(it.doc_key || '')}" data-token="${esc(
+        it.token || '',
+      )}" data-public-url="${esc(it.public_url || (it.token ? '/a/' + it.token : ''))}">
           <div class="ar-line">
             <span class="ar-title" title="${esc(it.title || it.doc_key)}">${esc(it.title || '未命名文档')}</span>
             <span class="ar-ver">v${it.version}</span>
@@ -467,9 +493,27 @@ export async function refreshArchiveList(q = ''): Promise<void> {
             ${archiveOpsHtml(it)}
           </div>
           <ul class="ar-history" hidden></ul>
-        </li>`,
-      )
-      .join('');
+        </li>`;
+
+    if (scope === 'all') {
+      // 全部空间视图：按空间分组（决策），组内仍按归档时间倒序
+      const groups = new Map<string, ArchiveItem[]>();
+      for (const it of items) {
+        const name = it.space_name || '未命名空间';
+        const bucket = groups.get(name);
+        if (bucket) bucket.push(it);
+        else groups.set(name, [it]);
+      }
+      list.innerHTML = [...groups.entries()]
+        .map(
+          ([name, rows]) =>
+            `<li class="ar-group-head">${esc(name)}<span class="ar-group-count">${rows.length}</span></li>` +
+            rows.map(rowHtml).join(''),
+        )
+        .join('');
+    } else {
+      list.innerHTML = items.map(rowHtml).join('');
+    }
   } catch (e) {
     if (seq !== listSeq) return;
     list.dataset.rendered = '1';
@@ -642,10 +686,32 @@ async function cleanOrphans(): Promise<void> {
   }
 }
 
+/** 归档页的空间筛选：当前空间 / 全部空间 / 指定空间（全部时按空间分组渲染）。 */
+let archiveSpaces: SpaceLite[] = [];
+let archiveScopeEl: HTMLSelectElement | null = null;
+
 export function initArchivePage(opts: PageOpts): void {
   pageOpts = opts;
   const list = $('archive-list');
   const input = $('archive-search') as HTMLInputElement;
+  const scopeSlot = $('archive-scope-slot');
+
+  /** 空间筛选下拉：默认当前空间，可切全部空间或指定空间（后端 ?space= 过滤）。 */
+  const paintScope = async (): Promise<void> => {
+    archiveSpaces = await loadSpaces();
+    scopeSlot.innerHTML = scopeSelectHtml('archive-scope', archiveSpaces, getCurrentSpaceId());
+    archiveScopeEl = scopeSlot.querySelector<HTMLSelectElement>('#archive-scope');
+    archiveScopeEl?.addEventListener('change', () => void refreshArchiveList(input.value.trim()));
+  };
+
+  onSpaceChanged(() => {
+    if (!archiveScopeEl) return;
+    // 切空间时把筛选复位到「当前空间」，避免停在旧空间上看空列表
+    archiveScopeEl.value = String(getCurrentSpaceId() ?? 'all');
+    syncScopeLabel(archiveScopeEl, archiveSpaces, getCurrentSpaceId());
+    void refreshArchiveList(input.value.trim());
+  });
+
   $('archive-orphans').addEventListener('click', () => void cleanOrphans());
   input.addEventListener('input', () => {
     clearTimeout(searchTimer);

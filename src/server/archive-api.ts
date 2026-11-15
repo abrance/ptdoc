@@ -223,7 +223,8 @@ export function archiveApiMiddleware(): Connect.NextHandleFunction {
         const body = await readJson(req).catch(() => ({}) as any);
         const theDoc = resolveDocRef(uid, archiveMatch[1]);
         if (!theDoc) throw new HttpError(404, '文档不存在');
-        const out = await archiveDoc(uid, theDoc.doc_key, body?.note ?? null);
+        // 传 id 而不是 doc_key：同名文档可分属不同空间，传 key 会因歧义 409
+        const out = await archiveDoc(uid, theDoc.id, body?.note ?? null);
         const token = out.token;
         return sendJson(res, 200, {
           id: out.artifact.id,

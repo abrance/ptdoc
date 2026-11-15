@@ -97,6 +97,7 @@
           <div class="global-search">
             <input id="global-search" type="search" placeholder="搜索文档（Ctrl+K）…" aria-label="全文搜索" autocomplete="off" />
             <div id="global-search-pop" class="global-search-pop" hidden>
+              <div class="global-search-scope"><span id="global-scope-slot"></span></div>
               <ul id="global-search-list" class="history-list"></ul>
             </div>
           </div>
@@ -126,10 +127,12 @@
               </button>
             </div>
             <div id="space-bar" class="space-bar">
-              <div id="space-list" class="space-list" role="tablist" aria-label="空间列表"></div>
-              <button id="space-new" class="icon-btn" type="button" title="新建空间" aria-label="新建空间">
-                <svg class="icon"><use href="#i-plus"></use></svg>
+              <button id="space-switch" class="space-switch" type="button" aria-haspopup="menu" aria-expanded="false" title="切换空间">
+                <svg class="icon space-switch-icon"><use href="#i-folder"></use></svg>
+                <span id="space-switch-name" class="space-switch-name">空间</span>
+                <span class="space-switch-caret" aria-hidden="true">▾</span>
               </button>
+              <div id="space-list" class="space-menu" role="menu" aria-label="空间列表" hidden></div>
             </div>
             <div class="space-tools">
               <button id="folder-new" class="space-tool-btn" type="button" title="在当前空间根目录新建目录">＋ 目录</button>
@@ -268,6 +271,7 @@
             <div class="archive-page">
               <header class="page-head">
                 <span class="page-title">归档</span>
+                <span id="archive-scope-slot"></span>
                 <input id="archive-search" type="search" placeholder="搜索标题或 doc_key…" aria-label="搜索归档" autocomplete="off" />
                 <button id="archive-orphans" type="button" title="扫桶里无记录引用的归档对象">清理孤儿对象</button>
                 <button id="media" type="button">媒体库</button>

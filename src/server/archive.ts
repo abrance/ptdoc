@@ -241,7 +241,8 @@ export interface ArchiveOutcome {
 
 export async function archiveDoc(
   userId: number,
-  ref: string,
+  /** 数字 id 或 doc_key。调用方已经定位到文档时请传 id：doc_key 现在每空间唯一，跨空间重名会 409。 */
+  ref: string | number,
   note?: string | null,
 ): Promise<ArchiveOutcome> {
   const doc = resolveDocRef(userId, ref);
