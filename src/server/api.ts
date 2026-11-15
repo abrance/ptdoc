@@ -15,6 +15,7 @@ import {
   renameDoc,
   deleteDoc,
   createSnapshot,
+  sha256Content,
   listSnapshots,
   listVersions,
   getVersion,
@@ -306,7 +307,12 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       }
       if (url === '/api/docs/full' && req.method === 'GET') {
         const space = parseSpaceFilter(uid, new URL(url, 'http://localhost').searchParams.get('space'));
-        return sendJson(res, 200, listAllDocsFull(uid, space));
+        // FR-31：附只读 content_sha256，供 ptdocctl 覆盖前比内容（不改表，按 content 现算）
+        return sendJson(
+          res,
+          200,
+          listAllDocsFull(uid, space).map((d) => ({ ...d, content_sha256: sha256Content(d.content) })),
+        );
       }
       if (url.startsWith('/api/docs/') && url.endsWith('/rename') && req.method === 'POST') {
         const id = Number(url.slice('/api/docs/'.length).split('/')[0]);
@@ -321,7 +327,8 @@ export function apiMiddleware(): Connect.NextHandleFunction {
       if (docIdMatch && req.method === 'GET') {
         const doc = getDoc(uid, Number(docIdMatch[1]));
         if (!doc) return sendJson(res, 404, { error: '不存在' });
-        return sendJson(res, 200, doc);
+        // FR-31：附只读 content_sha256，pull/push 用它比内容
+        return sendJson(res, 200, { ...doc, content_sha256: sha256Content(doc.content) });
       }
       if (url.startsWith('/api/docs') && req.method === 'GET') {
         const params = new URL(url, 'http://localhost').searchParams;
