@@ -386,11 +386,30 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
 
   function spaceMenu(space: SpaceRow, anchor: HTMLElement): void {
     const items: MenuItem[] = [];
-    if (space.is_default !== 1) items.push({ label: '重命名空间', run: () => void renameSpace(space) });
+    // 默认空间也可以改名（决策：默认空间可改名 + 可转默认）
+    items.push({ label: '重命名空间', run: () => void renameSpace(space) });
+    if (space.is_default !== 1) items.push({ label: '设为默认空间', run: () => void setDefault(space) });
     items.push({ label: '上移', run: () => void moveSpaceBy(space, -1) });
     items.push({ label: '下移', run: () => void moveSpaceBy(space, 1) });
     if (space.is_default !== 1) items.push({ label: '删除空间', run: () => void deleteSpace(space), danger: true });
     openRowMenu(anchor, items);
+  }
+
+  /** 转移默认标记：恒有且仅有一个默认空间，默认空间不可删。 */
+  async function setDefault(space: SpaceRow): Promise<void> {
+    if (space.is_default === 1) return;
+    try {
+      await api(`/api/spaces/${space.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_default: true }),
+      });
+      await loadSpaces();
+      renderSpaces();
+      opts.onStatus?.(`已把「${space.name}」设为默认空间`);
+    } catch (e) {
+      fail('设为默认失败：' + errorMessage(e));
+    }
   }
 
   // ─── 空间操作 ─────────────────────────────────────────
@@ -403,6 +422,7 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       rememberSpace(created.id);
       renderSpaces();
       await loadTree();
+      opts.onStatus?.(`已创建空间「${name.trim()}」`);
     } catch (e) {
       fail('新建空间失败：' + errorMessage(e));
     }
@@ -629,8 +649,12 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       renderTree();
     }
     try {
-      await post(`/api/docs/${doc.id}/move`, body);
+      const moved = await post<{ doc_key?: string }>(`/api/docs/${doc.id}/move`, body);
       if (target.folderId != null) collapsed.delete(target.folderId);
+      // 跨空间撞名时服务端会加 ~2 后缀；必须告诉用户，否则会以为文档丢了
+      if (moved.doc_key && moved.doc_key !== doc.doc_key) {
+        opts.onStatus?.(`已移动，目标空间已有同名文档，改名为「${moved.doc_key}」`);
+      }
       await loadTree();
     } catch (e) {
       if (snapshot && optimistic) {
@@ -1066,8 +1090,8 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       return;
     }
     if (!files || files.length === 0) return;
-    const exists = new Set((tree?.docs ?? []).map((d) => d.doc_key));
     const spaceId = currentSpaceId;
+    let renamed = 0;
     // 目录结构按导入时的相对路径落到真实 space_folders：先查现有同名目录，缺的再建。
     const folderByPath = new Map<string, number>();
     for (const folder of tree?.folders ?? []) {
@@ -1095,20 +1119,17 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
       return parentId;
     }
     let added = 0;
-    let skipped = 0;
     let failed = 0;
     opts.onStatus?.(`正在导入 ${files.length} 篇文档…`);
     for (const f of files) {
       const docKey = f.relPath.replace(/\\/g, '/');
-      if (exists.has(docKey)) {
-        skipped++;
-        continue;
-      }
       try {
         const segments = docKey.split('/');
         const filename = segments.pop() as string;
         const folderId = segments.length > 0 ? await ensureFolder(segments) : null;
-        await post('/api/docs', {
+        // 不在前端按 doc_key 判重：目标空间撞名由服务端自动加 ~2（与 ptdocctl 一致），
+        // 前端只负责把「被改名」的事实告诉用户，不能静默跳过别人的内容。
+        const created = await post<{ doc_key: string }>('/api/docs', {
           doc_key: docKey,
           title: titleFromMd(f.content, filename),
           filename,
@@ -1116,15 +1137,16 @@ export function initSidebar(opts: SidebarOptions): { refresh: () => Promise<void
           space_id: spaceId,
           folder_id: folderId,
         });
+        if (created.doc_key && created.doc_key !== docKey) renamed++;
         added++;
       } catch {
         failed++;
       }
     }
     await loadTree();
-    const skipNote = skipped > 0 ? `，跳过 ${skipped} 篇同名` : '';
+    const renamedNote = renamed > 0 ? `，${renamed} 篇因同名被改写为 ~N` : '';
     const failNote = failed > 0 ? `，失败 ${failed} 篇` : '';
-    opts.onStatus?.(`导入完成：新增 ${added} 篇${skipNote}${failNote}`);
+    opts.onStatus?.(`导入完成：新增 ${added} 篇${renamedNote}${failNote}`);
   }
 
   const refresh = async (): Promise<void> => {
