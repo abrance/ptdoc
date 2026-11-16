@@ -253,6 +253,16 @@ function setSidebarOpen(open: boolean): void {
 type NavPage = 'docs' | 'agent' | 'archive' | 'settings';
 let navPage: NavPage = 'docs';
 
+/** 归档 Tab 内的子页切换：归档产物 / 媒体库。Sider 导航按钮与主区域页都带 data-archive-view。 */
+function showArchiveView(view: 'artifacts' | 'media'): void {
+  document.querySelectorAll<HTMLElement>('[data-archive-view]').forEach((p) => {
+    const on = p.dataset.archiveView === view;
+    // 主区域用 hidden（[hidden] 有 display:none!important 兜底），Sider 按钮用 active 高亮
+    if (p.classList.contains('archive-page')) p.hidden = !on;
+    else p.classList.toggle('active', on);
+  });
+}
+
 function setNav(page: NavPage): void {
   navPage = page;
   document.body.dataset.nav = page;
@@ -279,6 +289,8 @@ function setNav(page: NavPage): void {
   if (page === 'agent') void refreshNavConvs();
   if (page === 'archive') void refreshArchiveList();
   if (page === 'settings') void syncSettingsDots();
+  // 归档 Tab 回到默认子页「归档产物」：重进一个 Tab 时不应该停在内部子页上
+  if (page === 'archive') showArchiveView('artifacts');
 }
 
 function initNav(): void {
@@ -1124,11 +1136,20 @@ void startGate((user: SessionUser) => {
   const mediaPanel = initMediaPanel({
     onInsert: (url, filename) => {
       insertAtCursor(`\n![${filename}](${url})\n`);
-      render();
+      scheduleRender();
+      scheduleSave();
+      setStatus('已插入到文档光标处：' + filename);
     },
     onStatus: setStatus,
   });
-  // 归档页主界面：产物列表；媒体库按钮（Sider + 页头）走抽屉
+  // 归档 Tab 下的两个主区域子页：归档产物 / 媒体库（Sider 两项导航）
+  document.querySelectorAll<HTMLButtonElement>('#archive-nav [data-archive-view]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const view = b.dataset.archiveView as 'artifacts' | 'media';
+      showArchiveView(view);
+      if (view === 'media') void mediaPanel.refresh();
+    }),
+  );
   initArchivePage({
     openDoc: (id) => {
       setNav('docs');
@@ -1145,9 +1166,6 @@ void startGate((user: SessionUser) => {
           ? currentDocKey
           : null,
   });
-  for (const btn of document.querySelectorAll('.share-media-btn, #media')) {
-    btn.addEventListener('click', () => mediaPanel.toggle());
-  }
 
   sidebarRef = initSidebar({
     onOpen: (id) => {

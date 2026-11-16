@@ -1,4 +1,5 @@
-// ─── 媒体库面板（抽屉：缩略图网格 / 复制 / 插入 / 删除）────────
+// ─── 媒体库（主区域页面：缩略图网格 / 复制 / 插入 / 删除）────────
+// 从原来的右侧抽屉改为归档 Tab 下的主区域子页，与「归档产物」并列。
 import { askConfirm } from './dialog';
 import { emptyStateBlockHtml } from './list-state';
 
@@ -33,63 +34,38 @@ function relTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; refresh: () => Promise<void> } {
-  let drawer: HTMLElement | null = null;
+/** 媒体库主区域页：DOM 由 index.html 提供（#media-search / #media-source / #media-grid）。 */
+export function initMediaPanel(opts: MediaPanelOptions): { refresh: () => Promise<void> } {
+  const $ = (id: string) => document.getElementById(id) as HTMLElement | null;
 
-  const ensure = (): HTMLElement => {
-    if (drawer && document.body.contains(drawer)) return drawer;
-    drawer = document.createElement('div');
-    drawer.id = 'media-drawer';
-    drawer.className = 'drawer media-drawer';
-    drawer.innerHTML = `
-      <div class="drawer-head">
-        <input id="media-search" type="search" placeholder="搜索文件名 / URL…" />
-        <select id="media-source" title="按来源筛选">
-          <option value="">全部来源</option>
-          <option value="direct">直接上传</option>
-          <option value="mermaid">mermaid 图</option>
-        </select>
-        <button id="media-close" type="button">✕</button>
-      </div>
-      <div id="media-grid" class="media-grid"></div>`;
-    document.body.appendChild(drawer);
-    $('media-close').addEventListener('click', () => drawer!.classList.remove('open'));
-    const search = $('media-search') as HTMLInputElement;
-    const source = $('media-source') as HTMLSelectElement;
-    search.addEventListener('input', () => void refresh());
-    source.addEventListener('change', () => void refresh());
-    const grid = $('media-grid') as HTMLElement;
-    grid.addEventListener('click', (e) => {
-      const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
-      const item = (e.target as HTMLElement).closest<HTMLElement>('.media-item');
-      if (!btn || !item) return;
-      const id = Number(item.dataset.id);
-      const op = btn.dataset.op;
-      if (op === 'copy') void copyUrl(id);
-      else if (op === 'insert') insertMedia(id);
-      else if (op === 'delete') void removeMedia(id);
-    });
-    return drawer;
+  const search = () => $('media-search') as HTMLInputElement | null;
+  const source = () => $('media-source') as HTMLSelectElement | null;
+  const grid = () => $('media-grid') as HTMLElement | null;
+
+  const fetchRows = async (withFilter = true): Promise<MediaRow[]> => {
+    const params = new URLSearchParams();
+    if (withFilter) {
+      const q = search()?.value.trim() ?? '';
+      const s = source()?.value ?? '';
+      if (q) params.set('q', q);
+      if (s) params.set('source', s);
+    }
+    const res = await fetch('/api/media?' + params.toString());
+    return (await res.json()) as MediaRow[];
   };
 
-  const $ = (id: string) => document.getElementById(id) as HTMLElement;
-
   const refresh = async (): Promise<void> => {
-    const grid = $('media-grid');
-    if (!grid) return;
-    const q = ($('media-search') as HTMLInputElement)?.value.trim() ?? '';
-    const source = ($('media-source') as HTMLSelectElement)?.value ?? '';
-    grid.innerHTML = '<div class="media-empty">加载中…</div>';
+    const el = grid();
+    if (!el) return;
+    const q = search()?.value.trim() ?? '';
+    const s = source()?.value ?? '';
+    el.innerHTML = '<div class="media-empty">加载中…</div>';
     try {
-      const params = new URLSearchParams();
-      if (q) params.set('q', q);
-      if (source) params.set('source', source);
-      const res = await fetch('/api/media?' + params.toString());
-      const rows = (await res.json()) as MediaRow[];
-      grid.innerHTML = '';
+      const rows = await fetchRows();
+      el.innerHTML = '';
       if (rows.length === 0) {
-        grid.innerHTML = emptyStateBlockHtml(
-          q || source ? '没有匹配的图片，换个关键词或来源试试' : '暂无图片，用上方「上传」加一张',
+        el.innerHTML = emptyStateBlockHtml(
+          q || s ? '没有匹配的图片，换个关键词或来源试试' : '暂无图片，在文档页用「上传图片」加一张',
           'panel',
         );
         return;
@@ -113,17 +89,16 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
         item.querySelector('img')!.onerror = () => {
           item.querySelector('img')!.style.opacity = '0.3';
         };
-        grid.appendChild(item);
+        el.appendChild(item);
       });
     } catch {
-      grid.innerHTML = '<div class="media-empty">加载失败</div>';
+      el.innerHTML = '<div class="media-empty">加载失败</div>';
     }
   };
 
   const copyUrl = async (id: number): Promise<void> => {
     try {
-      const res = await fetch('/api/media');
-      const rows = (await res.json()) as MediaRow[];
+      const rows = await fetchRows(false);
       const m = rows.find((r) => r.id === id);
       if (!m) return;
       await navigator.clipboard.writeText(m.url);
@@ -133,20 +108,15 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
     }
   };
 
-  const insertMedia = (id: number): void => {
-    // 直接在当前数据里找（refresh 已缓存行数据在 DOM dataset？重新拉一次更稳）
-    void (async () => {
-      const res = await fetch('/api/media');
-      const rows = (await res.json()) as MediaRow[];
-      const m = rows.find((r) => r.id === id);
-      if (!m) return;
-      opts.onInsert(m.url, m.filename);
-    })();
+  const insertMedia = async (id: number): Promise<void> => {
+    const rows = await fetchRows(false);
+    const m = rows.find((r) => r.id === id);
+    if (!m) return;
+    opts.onInsert(m.url, m.filename);
   };
 
   const removeMedia = async (id: number): Promise<void> => {
-    const res = await fetch('/api/media');
-    const rows = (await res.json()) as MediaRow[];
+    const rows = await fetchRows(false);
     const m = rows.find((r) => r.id === id);
     if (!m) return;
     const ok = await askConfirm('将同时删除七牛桶内文件。已生成的分享版/站点图片会失效，需重新生成。', {
@@ -168,12 +138,19 @@ export function initMediaPanel(opts: MediaPanelOptions): { toggle: () => void; r
     }
   };
 
-  return {
-    toggle: () => {
-      const d = ensure();
-      d.classList.toggle('open');
-      if (d.classList.contains('open')) void refresh();
-    },
-    refresh,
-  };
+  const g = grid();
+  search()?.addEventListener('input', () => void refresh());
+  source()?.addEventListener('change', () => void refresh());
+  g?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('button[data-op]');
+    const item = (e.target as HTMLElement).closest<HTMLElement>('.media-item');
+    if (!btn || !item) return;
+    const id = Number(item.dataset.id);
+    const op = btn.dataset.op;
+    if (op === 'copy') void copyUrl(id);
+    else if (op === 'insert') void insertMedia(id);
+    else if (op === 'delete') void removeMedia(id);
+  });
+
+  return { refresh };
 }
