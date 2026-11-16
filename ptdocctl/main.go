@@ -17,8 +17,15 @@
 //	ptdocctl pull [dir]                 # 全量拉取工作区 md 到本地目录（默认 ./docs）
 //	ptdocctl push <file> [file...]      # 上传 md（doc_key=文件名）
 //	ptdocctl pushr <dir>                # 递归 push 目录，doc_key 含子目录路径
-//	ptdocctl delete <doc_id>
-//	ptdocctl search <keyword>
+//	ptdocctl delete <doc_id|doc_key>    # 删除文档
+//	ptdocctl search <keyword>           # 搜索文档
+//	ptdocctl rename <doc> <new_key>     # 改 doc_key（文件名/路径）
+//	ptdocctl title <doc> <标题>         # 改标题（正文不动）
+//	ptdocctl versions <doc>             # 版本列表
+//	ptdocctl version <doc> <vid>        # 打印某个版本的正文
+//	ptdocctl snapshot <doc> [label]     # 手动存一个版本
+//	ptdocctl restore <doc> <vid>        # 回滚到某个版本（回滚前自动备份当前内容）
+//	ptdocctl export [file]              # 导出全站 md 为 zip（默认 ptdoc-export.zip）
 package main
 
 import (
@@ -43,6 +50,7 @@ type doc struct {
 	Content     string `json:"content,omitempty"`
 	ContentSha  string `json:"content_sha256,omitempty"`
 	UpdatedAtMs int64  `json:"updated_at"`
+	SpaceID     *int64 `json:"space_id"`
 }
 
 type client struct {
@@ -113,6 +121,20 @@ type spaceRow struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	IsDefault int    `json:"is_default"`
+}
+
+type versionItem struct {
+	ID          int64   `json:"id"`
+	Kind        string  `json:"kind"`
+	Label       *string `json:"label"`
+	Size        int64   `json:"size"`
+	Sha256Short string  `json:"sha256_short"`
+	CreatedAtMs int64   `json:"created_at"`
+}
+
+type versionList struct {
+	Items      []versionItem `json:"items"`
+	NextCursor *int64        `json:"next_cursor"`
 }
 
 // resolveSpace 把 --space 的名字/id 解析成空间 id；没给 --space 时返回 0（服务端按默认空间处理）。
@@ -248,6 +270,7 @@ func usage(w io.Writer) {
   --token <t>     设置页生成的静态 API Token（推荐）
   --user <name>   无 Token 时用用户名+密码登录（配合 --pass）
   --pass <pw>     同上，密码
+  --space <s>     空间名或 id；读命令按它过滤，写命令落该空间，缺省读=全部、写=默认空间
   --force         push/pull 覆盖前比内容，冲突时强行覆盖（push 先打快照；pull 先另存 .bak-<ts>）
 
 用法:
@@ -260,8 +283,15 @@ func usage(w io.Writer) {
   pull [dir]                 全量拉取工作区 md 到本地目录（默认 ./docs）
   push <file> [file...]      上传 md（doc_key=文件名）
   pushr <dir>                递归 push 目录，doc_key 含子目录路径
-  delete <doc_id>            删除文档
+  delete <doc_id|doc_key>    删除文档
   search <keyword>           搜索文档
+  rename <doc> <new_key>     改 doc_key（文件名/路径）
+  title <doc> <标题>         改标题（正文不动）
+  versions <doc>             版本列表
+  version <doc> <vid>        打印某个版本的正文
+  snapshot <doc> [label]     手动存一个版本
+  restore <doc> <vid>        回滚到某个版本（回滚前自动备份当前内容）
+  export [file]              导出全站 md 为 zip（默认 ptdoc-export.zip）
 `)
 }
 
@@ -386,6 +416,157 @@ func (c *client) del(s string) error {
 		return err
 	}
 	fmt.Printf("已删除 %d\t%s\n", d.ID, d.DocKey)
+	return nil
+}
+
+// rename 改 doc_key（不动正文）。服务端 POST /api/docs/:id/rename。
+func (c *client) rename(s, newKey string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]any{"new_key": newKey})
+	if _, err := c.do(http.MethodPost, fmt.Sprintf("/api/docs/%d/rename", d.ID), body); err != nil {
+		return err
+	}
+	fmt.Printf("已重命名 %d\t%s → %s\n", d.ID, d.DocKey, newKey)
+	return nil
+}
+
+// title 改标题：服务端没有单独的改标题接口，按 docs 现有语义「同 doc_key POST 即原地更新」
+// 把标题和原文一起写回去（只动 title，正文原样传）。
+func (c *client) title(s, title string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
+		"doc_key":  d.DocKey,
+		"title":    title,
+		"filename": d.Filename,
+		"content":  d.Content,
+	}
+	// upsertDoc 不带 space_id 时跨空间重名会 409，所以显式带上本文档所属空间
+	if d.SpaceID != nil {
+		body["space_id"] = *d.SpaceID
+	}
+	payload, _ := json.Marshal(body)
+	if _, err := c.do(http.MethodPost, "/api/docs", payload); err != nil {
+		return err
+	}
+	// 预期命中同一条记录；返回新 key 说明意外新建了，必须报出来
+	fmt.Printf("已改标题 %d\t%s → %s\n", d.ID, d.DocKey, title)
+	return nil
+}
+
+// versions 列版本（服务端返回 {items,next_cursor}，按时间倒序，无正文）。
+func (c *client) versions(s string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	limit := 50
+	b, err := c.do(http.MethodGet, fmt.Sprintf("/api/docs/%d/versions?limit=%d", d.ID, limit), nil)
+	if err != nil {
+		return err
+	}
+	var list versionList
+	if err := decode(b, &list); err != nil {
+		return err
+	}
+	if len(list.Items) == 0 {
+		fmt.Println("（无版本）")
+		return nil
+	}
+	for _, v := range list.Items {
+		label := ""
+		if v.Label != nil {
+			label = *v.Label
+		}
+		fmt.Printf("%d\t%s\t%s\t%d B\t%s\t%s\n", v.ID, v.Kind, time.UnixMilli(v.CreatedAtMs).Format("2006-01-02 15:04:05"), v.Size, v.Sha256Short, label)
+	}
+	return nil
+}
+
+// version 打印某个版本的正文（GET /api/docs/:id/versions/:vid）。
+func (c *client) version(s, vid string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	b, err := c.do(http.MethodGet, fmt.Sprintf("/api/docs/%d/versions/%s", d.ID, urlQueryEscape(vid)), nil)
+	if err != nil {
+		return err
+	}
+	var v struct {
+		Content string `json:"content"`
+	}
+	if err := decode(b, &v); err != nil {
+		return err
+	}
+	fmt.Print(v.Content)
+	if len(v.Content) > 0 && !strings.HasSuffix(v.Content, "\n") {
+		fmt.Println()
+	}
+	return nil
+}
+
+// snapshot 手动存一个版本（POST /api/docs/:id/versions）。
+func (c *client) snapshotVersion(s, label string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]any{"label": label})
+	b, err := c.do(http.MethodPost, fmt.Sprintf("/api/docs/%d/versions", d.ID), body)
+	if err != nil {
+		return err
+	}
+	var r struct {
+		ID int64 `json:"id"`
+	}
+	if err := decode(b, &r); err != nil {
+		return err
+	}
+	fmt.Printf("已保存版本 %d\t%s\n", r.ID, d.DocKey)
+	return nil
+}
+
+// restore 回滚到某个版本；服务端会先把当前内容存成「回滚前自动保存」的 manual 版本。
+func (c *client) restoreVersion(s, vid string) error {
+	d, err := c.resolve(s)
+	if err != nil {
+		return err
+	}
+	b, err := c.do(http.MethodPost, fmt.Sprintf("/api/docs/%d/versions/%s/restore", d.ID, urlQueryEscape(vid)), nil)
+	if err != nil {
+		return err
+	}
+	var r struct {
+		PreRestoreVersionID int64 `json:"pre_restore_version_id"`
+	}
+	_ = decode(b, &r)
+	fmt.Printf("已回滚 %s 到版本 %s（回滚前内容存为版本 %d）\n", d.DocKey, vid, r.PreRestoreVersionID)
+	return nil
+}
+
+// export 下载全站 md 的 zip（服务端现打包，二进制直接落盘）。
+func (c *client) exportZip(out string) error {
+	if out == "" {
+		out = "ptdoc-export.zip"
+	}
+	q, err := c.spaceQuery()
+	if err != nil {
+		return err
+	}
+	body, err := c.do(http.MethodGet, "/api/docs/export.zip"+q, nil)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(out, body, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("已导出 %d B → %s\n", len(body), out)
 	return nil
 }
 
@@ -767,6 +948,56 @@ func run(argv []string, stdout, stderr io.Writer) int {
 			break
 		}
 		err = c.pushr(args[0])
+	case "rename":
+		if len(args) != 2 {
+			err = fmt.Errorf("用法: ptdocctl rename <doc_id|doc_key> <new_key>")
+			break
+		}
+		err = c.rename(args[0], args[1])
+	case "title":
+		if len(args) < 2 {
+			err = fmt.Errorf("用法: ptdocctl title <doc_id|doc_key> <标题>")
+			break
+		}
+		err = c.title(args[0], strings.Join(args[1:], " "))
+	case "versions":
+		if len(args) != 1 {
+			err = fmt.Errorf("用法: ptdocctl versions <doc_id|doc_key>")
+			break
+		}
+		err = c.versions(args[0])
+	case "version":
+		if len(args) != 2 {
+			err = fmt.Errorf("用法: ptdocctl version <doc_id|doc_key> <version_id>")
+			break
+		}
+		err = c.version(args[0], args[1])
+	case "snapshot":
+		if len(args) < 1 || len(args) > 2 {
+			err = fmt.Errorf("用法: ptdocctl snapshot <doc_id|doc_key> [label]")
+			break
+		}
+		label := ""
+		if len(args) == 2 {
+			label = args[1]
+		}
+		err = c.snapshotVersion(args[0], label)
+	case "restore":
+		if len(args) != 2 {
+			err = fmt.Errorf("用法: ptdocctl restore <doc_id|doc_key> <version_id>")
+			break
+		}
+		err = c.restoreVersion(args[0], args[1])
+	case "export":
+		if len(args) > 1 {
+			err = fmt.Errorf("用法: ptdocctl export [输出文件]")
+			break
+		}
+		out := ""
+		if len(args) == 1 {
+			out = args[0]
+		}
+		err = c.exportZip(out)
 	default:
 		fmt.Fprintf(stderr, "未知命令: %s\n\n", cmd)
 		usage(stderr)

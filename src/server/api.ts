@@ -306,7 +306,9 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         });
         return sendJson(res, 200, r);
       }
-      if (url === '/api/docs/full' && req.method === 'GET') {
+      // 用 pathname 匹配：带 ?space= 时 url 不再是精确相等，曾落进下面的列表路由
+      const docsPath = url.split('?')[0];
+      if (docsPath === '/api/docs/full' && req.method === 'GET') {
         const space = parseSpaceFilter(uid, new URL(url, 'http://localhost').searchParams.get('space'));
         // FR-31：附只读 content_sha256，供 ptdocctl 覆盖前比内容（不改表，按 content 现算）
         return sendJson(
@@ -316,7 +318,7 @@ export function apiMiddleware(): Connect.NextHandleFunction {
         );
       }
       // FR-29 全站 Markdown 一键导出：全部 docs 的 .md + INDEX.md + archive-urls.csv，打成 store zip
-      if (url === '/api/docs/export.zip' && req.method === 'GET') {
+      if (docsPath === '/api/docs/export.zip' && req.method === 'GET') {
         const space = parseSpaceFilter(uid, new URL(url, 'http://localhost').searchParams.get('space'));
         const zip = buildExportZip(listAllDocsFull(uid, space));
         res.statusCode = 200;
