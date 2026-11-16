@@ -157,10 +157,11 @@
             <div class="sider-note">会话状态（可观测/草稿）展示在右侧工作区。</div>
           </div>
           <div class="sider-page" data-page="archive">
-            <nav class="nav-menu">
-              <button class="share-media-btn" type="button">媒体库</button>
+            <nav class="nav-menu" id="archive-nav">
+              <button type="button" data-archive-view="artifacts" class="active">归档产物</button>
+              <button type="button" data-archive-view="media">媒体库</button>
             </nav>
-            <div class="sider-note">归档产物在右侧列表管理：每篇文档一个固定链接，重新归档链接不变。</div>
+            <div class="sider-note">归档产物：每篇文档一个固定链接，重新归档链接不变。媒体库：所有上传过的图片，可复制/插入/删除。</div>
           </div>
           <div class="sider-page" data-page="settings">
             <div class="nav-group">
@@ -266,17 +267,28 @@
               </div>
             </div>
           </section>
-          <!-- 归档列表页（Sider = 媒体库入口，这里 = 归档产物列表） -->
+          <!-- 归档页（Sider 两项：归档产物 / 媒体库，各自一个主区域子页） -->
           <section class="main-page" data-main="archive">
-            <div class="archive-page">
+            <div class="archive-page" data-archive-view="artifacts">
               <header class="page-head">
                 <span class="page-title">归档</span>
                 <span id="archive-scope-slot"></span>
                 <input id="archive-search" type="search" placeholder="搜索标题或 doc_key…" aria-label="搜索归档" autocomplete="off" />
                 <button id="archive-orphans" type="button" title="扫桶里无记录引用的归档对象">清理孤儿对象</button>
-                <button id="media" type="button">媒体库</button>
               </header>
               <ul id="archive-list" class="archive-list"></ul>
+            </div>
+            <div class="archive-page media-page" data-archive-view="media" hidden>
+              <header class="page-head">
+                <span class="page-title">媒体库</span>
+                <input id="media-search" type="search" placeholder="搜索文件名 / URL…" aria-label="搜索媒体" autocomplete="off" />
+                <select id="media-source" title="按来源筛选">
+                  <option value="">全部来源</option>
+                  <option value="direct">直接上传</option>
+                  <option value="mermaid">mermaid 图</option>
+                </select>
+              </header>
+              <div id="media-grid" class="media-grid"></div>
             </div>
           </section>
           <!-- 设置主界面（Sider = 分区导航，这里 = 设置分区） -->
