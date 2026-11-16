@@ -109,10 +109,10 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| POST | `/api/share` | ✅ | `{doc_key?,share_md,images?,md_url?,html_url?}` | `{id}` | `api.ts:353` | ✅ |
-| GET | `/api/share` | ✅ | `?doc_key=` 可选 | `[{id,user_id,doc_key,md_url,html_url,created_at}]` | `api.ts:381` | ✅ |
-| GET | `/api/share/:id` | ✅ | — | `{...share, images:[...]}`；不存在 404 | `api.ts:374` | ✅ |
-| POST | `/api/share/:id/html` | ✅ | `{html_url}` | `{ok:true}` | `api.ts:366` | ✅ |
+| POST | `/api/share` | ✅ | `{doc_key?,share_md,images?,md_url?,html_url?}` | `{id}` | `api.ts:355` | ✅ |
+| GET | `/api/share` | ✅ | `?doc_key=` 可选 | `[{id,user_id,doc_key,md_url,html_url,created_at}]` | `api.ts:372` | ✅ |
+| GET | `/api/share/:id` | ✅ | — | `{...share, images:[...]}`；不存在 404 | `api.ts:366` | ✅ |
+| POST | `/api/share/:id/html` | ✅ | `{html_url}` | `{ok:true}` | `api.ts:360` | ✅ |
 | DELETE | `/api/share/:id` | ✅ | `?purge=1` 时同时删七牛对象 | `{ok:true,deleted?}`；不带 purge 不影响七牛文件 | `archive-api.ts:258` | ✅ |
 | GET | `/s/:id` | ✅（**要认证**，匿名 401） | — | `text/html`；文档已有归档 token 时 302 到 `/a/<token>` | `api.ts:98` | ✅ |
 
@@ -125,8 +125,8 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/media` | ✅ | `?q=`（filename/url 模糊）、`?source=direct\|mermaid\|share` | `MediaRow[]`（最多 500，按时间倒序） | `api.ts:195` | ✅ |
-| DELETE | `/api/media/:id` | ✅ | — | `{ok:true}`；同时删七牛对象 | `api.ts:202` | ⚠️ 未实测（需七牛） |
+| GET | `/api/media` | ✅ | `?q=`（filename/url 模糊）、`?source=direct\|mermaid\|share` | `MediaRow[]`（最多 500，按时间倒序） | `api.ts:382` | ✅ |
+| DELETE | `/api/media/:id` | ✅ | — | `{ok:true}`；同时删七牛对象 | `api.ts:394` | ⚠️ 未实测（需七牛） |
 | GET | `/api/upload` | ✅ | — | `{configured:boolean}` | `upload-api.ts:24` | ✅ |
 | POST | `/api/upload` | ✅ | 裸二进制 body；头 `x-filename`、可选 `x-key-prefix`、`x-source: mermaid\|share\|direct` | `{key,url}` | `upload-api.ts:28` | ⚠️ 未实测（需七牛密钥；未配置时 400 `请先完成对象存储配置`） |
 
@@ -137,8 +137,8 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/mermaid-cache` | ✅ | — | `{<hash>: "<url>"}` | `api.ts:212` | ✅ |
-| POST | `/api/mermaid-cache` | ✅ | `{hash,key,url}` | `{ok:true}` | `api.ts:215` | ✅ |
+| GET | `/api/mermaid-cache` | ✅ | — | `{<hash>: "<url>"}` | `api.ts:404` | ✅ |
+| POST | `/api/mermaid-cache` | ✅ | `{hash,key,url}` | `{ok:true}` | `api.ts:407` | ✅ |
 
 按内容 SHA-256 去重，同一图表不重复上传；配色/线型版本升级靠前端
 `MERMAID_CACHE_VERSION` 自增淘汰旧缓存。
@@ -149,8 +149,8 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/storage` | ✅ | — | `{access_key,bucket,domain,zone,private_bucket,url_ttl,secret_configured,verified}`（不回显 SecretKey） | `api.ts:77` | ✅ |
-| POST | `/api/storage/test` | ✅ | 同 PUT 字段 | `{ok:true}`；连通性失败 400 带七牛原文 | `api.ts:80` | ✅（错误分支） |
+| GET | `/api/storage` | ✅ | — | `{access_key,bucket,domain,zone,private_bucket,url_ttl,secret_configured,verified}`（不回显 SecretKey） | `api.ts:121` | ✅ |
+| POST | `/api/storage/test` | ✅ | 同 PUT 字段 | `{ok:true}`；连通性失败 400 带七牛原文 | `api.ts:124` | ✅（错误分支） |
 | PUT | `/api/storage` | ✅ | `{access_key,secret_key?,bucket,domain,zone,private_bucket?,url_ttl?}` | 保存后的公开配置；`secret_key` 省略则沿用旧值 | `api.ts:136` | ✅（错误分支） |
 | POST | `/api/storage/selfcheck` | ✅ | 同 PUT 字段（未保存也能测） | 私有桶自检：上传探针图 → 重签 → HEAD 的三态结果 | `api.ts:131` | ✅ |
 
