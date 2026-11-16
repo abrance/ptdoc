@@ -23,9 +23,10 @@ PTDoc 是一个个人 Markdown 文档工具：文档存 SQLite，图片走七牛
 | 你想做的事 | 用哪条 | 理由 |
 | --- | --- | --- |
 | 脚本 / CI / 智能体批量同步文档 | `ptdocctl` | 一条命令完成 pull/push/pushr，无需拼 JSON |
-| 改标题、删单篇、搜关键字、看归档 | `ptdocctl` | 子命令齐全，输出人类可读 |
+| 改标题/改 doc_key、删单篇、搜关键字 | `ptdocctl` | `title` / `rename` / `delete` / `search` |
+| 看版本、回滚、导出全站 md | `ptdocctl` | `versions` / `version` / `snapshot` / `restore` / `export` |
 | 智能体只要拿结构化数据（JSON） | REST `curl` | CLI 没有 JSON 输出模式 |
-| 生成分享记录、写快照、读分享页、管用户 | REST `curl` | CLI 没有对应子命令 |
+| 生成分享记录、读分享页、管归档/媒体/空间/用户 | REST `curl` | CLI 没有对应子命令 |
 | 上传图片 | REST `curl` | 唯一入口是 `POST /api/upload` |
 
 先定一个变量，后面所有示例都用它：

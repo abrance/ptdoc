@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
-import { closeDB, createUser, initDB, insertSession, upsertDoc } from './db.ts';
+import { closeDB, createSpace, createUser, initDB, insertSession, upsertDoc } from './db.ts';
 import { hashToken } from './auth.ts';
 import { loadServerEnv } from './env.ts';
 import { apiMiddleware } from './api.ts';
@@ -154,5 +154,30 @@ test('FR-29 GET /api/docs/export.zip 返回 zip，解压后 md 与库内内容�
   assert.ok(files.includes('INDEX.md'));
   assert.ok(files.includes('archive-urls.csv'));
   assert.equal(readFileSync(join(dir, 'dir/a.md'), 'utf8'), '# A\n正文\n');
+  closeDB();
+});
+
+test('GET /api/docs/full?space= 与 export.zip?space= 不再落进列表路由（回归）', async () => {
+  const { user, token } = boot();
+  const sp = createSpace(user.id, '工作');
+  upsertDoc(user.id, 'in-space.md', 'S', 's.md', '# S\n空间内\n', { spaceId: sp.id });
+  upsertDoc(user.id, 'outside.md', 'O', 'o.md', '# O\n空间外\n');
+
+  const full = await call(apiMiddleware() as any, `/api/docs/full?space=${sp.id}`, 'GET', token);
+  assert.equal(full.res.statusCode, 200);
+  const rows = full.json();
+  assert.ok(Array.isArray(rows), '必须返回数组而不是列表对象');
+  assert.equal(rows.length, 1, '只返回该空间的文档');
+  assert.equal(rows[0].doc_key, 'in-space.md');
+  assert.equal(rows[0].content, '# S\n空间内\n', 'pull 依赖 content，缺了会写空文件');
+  assert.match(rows[0].content_sha256, /^[0-9a-f]{64}$/);
+
+  const zip = await call(apiMiddleware() as any, `/api/docs/export.zip?space=${sp.id}`, 'GET', token);
+  assert.equal(zip.res.statusCode, 200);
+  assert.equal(zip.res.headers['content-type'], 'application/zip');
+  const dir = mkdtempSync(join(tmpdir(), 'ptdoc-unzip-'));
+  const files = extractZipToDir(Buffer.from(zip.res.body, 'binary'), dir);
+  assert.ok(files.includes('in-space.md'));
+  assert.ok(!files.includes('outside.md'), '导出应按空间过滤');
   closeDB();
 });

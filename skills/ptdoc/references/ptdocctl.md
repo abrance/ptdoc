@@ -5,16 +5,19 @@
 外壳**，行为差异只在输出格式上，不要按两套事实理解。
 
 - 源码：`ptdocctl/main.go`（单文件，`go build` 即得）
-- 最新发布：GitHub Releases 上的 `v1.4.x` 系列，制品名
-  `ptdocctl-v<tag>-<os>-<arch>.tar.gz`（另附 `SHA256SUMS`）
+- 最新发布：GitHub Releases 上的 `v1.4.x` 之后逐版递增，当前 line 为 `v1.7.x`；
+  制品名 `ptdocctl-v<tag>-<os>-<arch>.tar.gz`（另附 `SHA256SUMS`）。用 `latest/download`
+  拿最新版，别把版本号写死在脚本里
 - 本仓库**不存放二进制**：需要就用下面的安装方式取，别把 tar 包提交进仓库
 
 ## 安装
 
 ```bash
 # 方式一：从 Releases 下载（Linux amd64 示例；macOS/arm64/windows 换对应制品名）
-curl -fsSLO https://github.com/abrance/ptdoc/releases/latest/download/ptdocctl-v1.4.5-linux-amd64.tar.gz
-tar xzf ptdocctl-v1.4.5-linux-amd64.tar.gz && sudo install -m755 ptdocctl-v1.4.5-linux-amd64 /usr/local/bin/ptdocctl
+# 用 GitHub API 取最新 tag 再拼文件名，避免写死版本
+TAG=$(curl -fsSL https://api.github.com/repos/abrance/ptdoc/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+curl -fsSLO "https://github.com/abrance/ptdoc/releases/latest/download/ptdocctl-v${TAG}-linux-amd64.tar.gz"
+tar xzf "ptdocctl-v${TAG}-linux-amd64.tar.gz" && sudo install -m755 "ptdocctl-v${TAG}-linux-amd64" /usr/local/bin/ptdocctl
 
 # 方式二：源码编译（需要 Go ≥ 1.21）
 make ptdocctl-install          # 装到 /usr/local/bin/ptdocctl
@@ -30,6 +33,7 @@ cd ptdocctl && go build -o /tmp/ptdocctl .
 --user <name>   无 Token 时用用户名 + 密码登录
 --pass <pw>     同上
 --space <s>     空间名或 id：读命令按它过滤，写命令落该空间；缺省时读=全部、写=默认空间
+--force         push/pull 覆盖前比内容，冲突时强行覆盖（push 先打快照；pull 先留 .bak-<ts>）
 ```
 
 参数可放在子命令前后，也支持 `--token=xxx` 连写。缺 `--url` 或缺认证时直接报错退出，
@@ -60,26 +64,51 @@ C="ptdocctl --url $PTDOC_URL --token $PTDOC_TOKEN"
 | `push <file>...` | 上传，doc_key=文件名 | 每个文件 `POST /api/docs`（带 `space_id`） | `已上传 <file> → <doc_key>`；被服务端改名时附「服务端改写为 …」 |
 | `pushr <dir>` | 递归上传，doc_key 含子目录 | 同上，串行 | 每行 `已上传 …` + `共上传 N 个文件` |
 | `delete <doc_id\|doc_key>` | 删文档 | 先定位，再 `DELETE /api/docs/<id>` | `已删除 <id><TAB><doc_key>` |
+| `rename <doc> <new_key>` | 改 doc_key（文件名/路径） | `POST /api/docs/<id>/rename` | `已重命名 <id><TAB><旧> → <新>` |
+| `title <doc> <标题>` | 改标题，正文不动 | `POST /api/docs`（原 doc_key + 原正文 + 原 space_id） | `已改标题 <id><TAB><key> → <标题>` |
+| `versions <doc>` | 版本列表（倒序，无正文） | `GET /api/docs/<id>/versions?limit=50` | `id<TAB>kind<TAB>时间<TAB>大小<TAB>sha7<TAB>label` |
+| `version <doc> <vid>` | 打印某个版本的正文 | `GET /api/docs/<id>/versions/<vid>` | 正文原文 |
+| `snapshot <doc> [label]` | 手动存一个版本 | `POST /api/docs/<id>/versions` | `已保存版本 <vid><TAB><doc_key>` |
+| `restore <doc> <vid>` | 回滚到某个版本 | `POST /api/docs/<id>/versions/<vid>/restore` | `已回滚 … （回滚前内容存为版本 <n>）` |
+| `export [file]` | 导出全站 md 为 zip（`--space` 时只导该空间） | `GET /api/docs/export.zip[?space=]` | `已导出 <N> B → <file>` |
 
-实测（本轮在独立实例上跑过，v1.4.5 源码构建 + 发布版二进制行为一致）：
+实测（独立实例 5199，源码构建；`--space` 与 FR-31 冲突检测在 v1.7.x，新增的
+rename/title/versions/version/snapshot/restore/export 在 v1.8.0）：
 
 ```
-$ pt docctl whoami
-user=verifier id=1 role=admin server=http://127.0.0.1:5199
+$ ptdocctl … whoami
+user=e2e id=1 role=admin server=http://127.0.0.1:5199
 
-$ ptdocctl … pushr ./docs
-已上传 /tmp/ptdoc-cli/docs/cli-test.md → cli-test.md
-共上传 1 个文件
+$ ptdocctl … pushr /tmp/e2e-docs
+已上传 /tmp/e2e-docs/a.md → a.md
+已上传 /tmp/e2e-docs/sub/b.md → sub/b.md
+共处理 2 个文件，实际上传 2 个
 
-$ ptdocctl … list
-2	cli-test.md	CLI 上传测试
+$ ptdocctl … --space 工作 push /tmp/e2e-work.md
+已上传 /tmp/e2e-work.md → e2e-work.md
 
-$ ptdocctl … pull /tmp/pulled
-已写入 /tmp/pulled/cli-test.md
-共拉取 1 个文档 → /tmp/pulled
+$ ptdocctl … rename sub/b.md renamed/b.md
+已重命名 2	sub/b.md → renamed/b.md
 
-$ ptdocctl … delete cli-test.md
-已删除 2	cli-test.md
+$ ptdocctl … title renamed/b.md '改名后的标题'
+已改标题 2	renamed/b.md → 改名后的标题
+
+$ ptdocctl … versions renamed/b.md
+5	manual	2026-11-16 12:27:59	24 B	0ccdfb9	第二版
+4	manual	2026-11-16 12:27:59	24 B	0ccdfb9	发版前
+2	auto	2026-11-16 12:26:41	24 B	0ccdfb9	
+
+$ ptdocctl … restore renamed/b.md 2
+已回滚 renamed/b.md 到版本 2（回滚前内容存为版本 7）
+
+$ ptdocctl … --space 工作 export /tmp/e2e-work.zip
+已导出 543 B → /tmp/e2e-work.zip
+
+$ ptdocctl … push /tmp/e2e-docs/a.md        # 两边都改过
+检测到 1 个内容冲突（本地与远端都改过），未覆盖：
+  a.md	本地 2026-11-16T12:29:20+08:00	远端 2026-11-16T12:26:41+08:00
+确认要覆盖请加 --force
+ptdocctl: 检测到 1 个内容冲突，已中止        # 退出码 1
 ```
 
 ## 行为细节（写脚本前必读）
@@ -92,19 +121,27 @@ $ ptdocctl … delete cli-test.md
   退出，**按 doc_key 幂等，重跑即可**。
 - `pull` 用 `doc_key` 作落盘路径（`ops/deploy.md` → `<dir>/ops/deploy.md`），会自动建目录；
   绝对路径或含 `..` 的 `doc_key` 会被跳过并打印 `跳过异常 doc_key: …`。
-- `get` / `delete` 的形参**既可以是数字 id，也可以是 doc_key 或文件名**：纯数字先按 id 查，
+- `get` / `delete` / `rename` / `title` / `versions` / `version` / `snapshot` / `restore` 的
+  `<doc>` 形参**既可以是数字 id，也可以是 doc_key 或文件名**：纯数字先按 id 查，
   查不到再当 doc_key；其余按 doc_key/filename 在 `list` 结果里匹配。找不到时报
   `ptdocctl: 未找到文档: <形参>`，退出码 1。
 - `--user/--pass` 只是登录换 Cookie，仅在没给 `--token` 时生效；Cookie 只在单次进程内有效，
   每次运行都会重新登录。
 - 所有输出都是**人类可读文本，没有 JSON 模式**。要结构化数据走 curl（见
   `references/api.md`）；解析 `list` 时按 TAB 切列。
+- `push`/`pull` 默认**比内容再写**：远端与本地 sha256 一致就跳过（不产生写入）；不一致时
+  不覆盖，列冲突清单后退出码 1。加 `--force` 才覆盖：`push --force` 先给远端打快照，
+  `pull --force` 先把本地另存 `<file>.bak-<ts>`。
+- `title` 走的是 upsert（服务端无单独改标题接口），所以会把**原文档全文原样回传**；正文
+  不会变，但服务端会更新 `updated_at` 并可能触发一次自动快照。
+- `restore` 回滚前服务端会自动把当前内容存成 manual 版本，回滚本身不丢内容。
 
 ## 已知限制
 
-- 无 JSON 输出、无 `--dry-run`、无版本历史/回滚。`push` 覆盖即最终态——重要文档改动前先
-  `pull` 存副本（服务端快照接口只能走 REST：`POST /api/docs/<id>/snapshots`）。
-- 没有分享、媒体、归档、用户管理、扩展管理的子命令，这些只能走 REST。
+- 无 JSON 输出、无 `--dry-run`。版本历史/回滚已有 `versions` / `version` / `snapshot` /
+  `restore` 四个命令；`push` 覆盖前也会自动比内容。
+- 没有分享、媒体、归档、用户管理、扩展、空间管理的子命令，这些只能走 REST。
+- `versions` 只取第一页（`limit=50`），更早的版本没有翻页入口（可用 curl 带 `cursor`）。
 - `pull` 是全量，没有增量/单目录过滤；文档很多时输出很长。
 - 没有并发控制，`pushr` 是串行；两个进程同时对同一 doc_key push 时后到的覆盖先到的。
 

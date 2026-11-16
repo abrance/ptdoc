@@ -43,52 +43,81 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/docs` | ✅ | `?q=` 可选（`LIKE %q%` 匹配 title/filename/content，最多 50） | `DocSummary[]` | `api.ts:161` | ✅ |
-| GET | `/api/docs/full` | ✅ | — | `DocRow[]`（含 content） | `api.ts:143` | ✅ |
-| GET | `/api/docs/:id` | ✅ | 数字 id | `DocRow`；不存在 404 | `api.ts:155` | ✅ |
-| POST | `/api/docs` | ✅ | `{doc_key,title?,filename?,content?}`；同 `doc_key` 即原地更新 | `{id,doc_key}` | `api.ts:138` | ✅ |
-| POST | `/api/docs/:id/rename` | ✅ | `{new_key}`；级联更新 shares.doc_key | `{ok:true}` | `api.ts:146` | ✅ |
-| DELETE | `/api/docs/:id` | ✅ | 数字 id（不吃 doc_key） | `{ok:true}` | `api.ts:151` | ✅ |
-| POST | `/api/docs/:id/snapshots` | ✅ | `{label?}` | `{id}` | `api.ts:121` | ✅ |
-| GET | `/api/docs/:id/snapshots` | ✅ | — | `[{id,doc_id,content,label,created_at}]` | `api.ts:126` | ✅ |
-| POST | `/api/docs/:id/snapshots/:snapshotId/restore` | ✅ | — | `{ok:true}`；只回写正文 | `api.ts:129` | ✅ |
-| DELETE | `/api/docs/:id/snapshots/:snapshotId` | ✅ | — | `{ok:true}` | `api.ts:133` | ✅ |
-| POST | `/api/docs/:id/archive-path` | ✅ | `{archive_path}`；需该文档已有一个带 `html_url` 的分享，否则 400 `文档尚未归档` | `{ok:true}` | `api.ts:111` | ✅（含错误分支） |
-| POST | `/api/docs/:id/qdrant-sync` | ✅ | — | 同步结果；文档未归档 400 | `api.ts:116` | ✅（错误分支） |
+| GET | `/api/docs` | ✅ | `?q=` 可选（`LIKE %q%` 匹配 title/filename/content，最多 50）、`?space=<id\|name\|all>` | `DocSummary[]` | `api.ts:348` | ✅ |
+| GET | `/api/docs/full` | ✅ | `?space=` 可选 | `DocRow[]`（含 `content` 与只读 `content_sha256`） | `api.ts:311` | ✅ |
+| GET | `/api/docs/:id` | ✅ | 数字 id | `DocRow` + `content_sha256`；不存在 404 | `api.ts:341` | ✅ |
+| POST | `/api/docs` | ✅ | `{doc_key,title?,filename?,content?,space_id?,folder_id?}`；同空间同 `doc_key` 即原地更新；跨空间撞名自动 `~2` | `{id,doc_key}`（回显最终 key） | `api.ts:301` | ✅ |
+| POST | `/api/docs/:id/rename` | ✅ | `{new_key}`；级联更新 shares.doc_key | `{ok:true}` | `api.ts:331` | ✅ |
+| DELETE | `/api/docs/:id` | ✅ | 数字 id（不吃 doc_key）；只删记录，不删七牛对象 | `{ok:true}` | `api.ts:336` | ✅ |
+| POST | `/api/docs/:id/move` | ✅ | `{space_id?,folder_id?,before_id?/after_id?}`；跨空间撞名自动 `~2` | `{ok,space_id,folder_id,sort_order,doc_key}` | `api.ts:214` | ✅ |
+| POST | `/api/docs/:id/reorder` | ✅ | `{before_id?,after_id?}` | `{ok:true}` | `api.ts:219` | ✅ |
+| POST | `/api/docs/:id/snapshots` | ✅ | `{label?}`（旧接口，等价于 versions POST） | `{id}` | `api.ts:225` | ✅ |
+| GET | `/api/docs/:id/snapshots` | ✅ | — | `[{id,doc_id,content,label,created_at}]` | `api.ts:229` | ✅ |
+| POST | `/api/docs/:id/snapshots/:snapshotId/restore` | ✅ | — | `{ok:true}`；只回写正文 | `api.ts:233` | ✅ |
+| DELETE | `/api/docs/:id/snapshots/:snapshotId` | ✅ | — | `{ok:true}` | `api.ts:237` | ✅ |
+| POST | `/api/docs/:id/archive-path` | ✅ | `{archive_path}`；需该文档已有一个带 `html_url` 的分享，否则 400 `文档尚未归档` | `{ok:true}` | `api.ts:157` | ✅（含错误分支） |
+| POST | `/api/docs/:id/qdrant-sync` | ✅ | — | 同步结果；文档未归档 400 | `api.ts:162` | ✅（错误分支） |
+| GET | `/api/docs/export.zip` | ✅ | `?space=` 可选 | `application/zip`：全部 md + `INDEX.md` + `archive-urls.csv` | `api.ts:321` | ✅ |
 
-**已知限制**：`doc_key` 当路径参数用时必须 URL 转义（`ops/a.md` → `ops%2Fa.md`）。裸斜杠不
-会被当作键：`GET /api/docs/ops/a.md/archive` 会按前缀落到文档列表路由，返回 200 的文档列表
-（静默错结果，而不是 404）。服务端只保证 `%2F` 形式与非法转义回退可解析，不改路由行为。
+### 文档版本（FR-22/24）
 
-`DocSummary` = `{id, doc_key, title, filename, updated_at, last_opened_at}`；
-`DocRow` 再加 `user_id, content, created_at, archive_path, qdrant_sync_share_id, qdrant_synced_at`。
-时间都是毫秒时间戳。`/api/docs/:id/qdrant-sync` 的成功返回依赖 Qdrant 配置，本机未配，
-只验证了 400 `文档尚未归档` 分支。
+`:id` 同时接受**数字 id 或 URL 转义后的 doc_key**（`ops%2Fa.md`）。
+
+| 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
+| --- | --- | --- | --- | --- | --- | --- |
+| GET | `/api/docs/:id/versions` | ✅ | `?limit=`(1–200，默认 50)、`?cursor=`(上一页最后一条 id)、`?kind=auto\|manual` | `{items:[{id,doc_id,kind,label,size,sha256,sha256_short,created_at}], next_cursor}` | `api.ts:268` | ✅ |
+| POST | `/api/docs/:id/versions` | ✅ | `{label?}` | `{id}` | `api.ts:268` | ✅ |
+| GET | `/api/docs/:id/versions/:vid` | ✅ | — | `{id,kind,label,content,size,sha256,created_at}` | `api.ts:248` | ✅ |
+| POST | `/api/docs/:id/versions/:vid/restore` | ✅ | — | `{ok,pre_restore_version_id}`；回滚前自动存 manual 版本 | `api.ts:242` | ✅ |
+| DELETE | `/api/docs/:id/versions/:vid` | ✅ | — | `{ok:true}` | `api.ts:248` | ✅ |
+
+**已知限制**：`doc_key` 当路径参数用时必须 URL 转义（`ops/a.md` → `ops%2Fa.md`）。裸斜杠会被
+`hasBareDocKeySlash` 直接 400（`http.ts:58`，尾段白名单 `DOC_REF_TAILS_RE`），不再静默落到文档列表。
+新增 `/api/docs/:id/*` 子路由时必须同步那个正则，否则新路由会被误判成裸斜杠。
+
+`DocSummary` = `{id, doc_key, title, filename, updated_at, last_opened_at, space_id, folder_id, sort_order}`；
+`DocRow` 再加 `user_id, content, created_at, archive_path, archive_token, qdrant_sync_share_id, qdrant_synced_at`。
+`content_sha256` 是**只读且现算的**，不落表，供 ptdocctl 覆盖前比内容。
+时间都是毫秒时间戳。
 
 ## 3. 归档
 
+源码：`src/server/archive-api.ts`（匿名入口 `/a/*` 也在这里）
+
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/archive` | ✅ | `?q=` 可选 | `{entries:ArchiveEntry[], folders:Folder[]}` | `api.ts:93` | ✅ |
-| POST | `/api/archive/folders` | ✅ | `{path}` | `{id,path,created_at}` | `api.ts:98` | ✅ |
-| POST | `/api/archive/folders/rename` | ✅ | `{from,to}` | 重命名结果 | `api.ts:102` | ⚠️ 未实测（行为同下面两者，未在验证实例调用） |
-| DELETE | `/api/archive/folders` | ✅ | `?path=`；目录非空时 400 `文件夹内还有归档文档` | `{ok:true}` | `api.ts:106` | ✅（含错误分支） |
+| GET | `/api/archive` | ✅ | `?q=`、`?space=`、`?include=all` | `{items:ArchiveItem[], entries:ArchiveEntry[], folders:Folder[]}` | `archive-api.ts:162` | ✅ |
+| GET | `/api/archive/orphans` | ✅ | `?apply=1` 才真删；默认 dry-run | `{scanned,referenced,orphans,deleted?,warnings?,applied}` | `archive-api.ts:174` | ✅（真七牛桶） |
+| POST | `/api/archive/folders` | ✅ | `{path}` | `{id,path,created_at}` | `api.ts:143` | ✅ |
+| POST | `/api/archive/folders/rename` | ✅ | `{from,to}` | 重命名结果 | `api.ts:147` | ⚠️ 未实测 |
+| DELETE | `/api/archive/folders` | ✅ | `?path=`；目录非空时 400 `文件夹内还有归档文档` | `{ok:true}` | `api.ts:151` | ✅（含错误分支） |
+| POST | `/api/docs/:ref/archive` | ✅ | `{note?}`；`:ref` 接受 id 或转义 doc_key | `{id,version,token,public_url,md_url,html_url,unchanged,image_warnings}` | `archive-api.ts:221` | ✅ |
+| GET | `/api/docs/:ref/archive` | ✅ | — | `{token,public_url,stale,current,history[]}` | `archive-api.ts:240` | ✅ |
+| GET | `/api/docs/:ref/archive-status` | ✅ | — | `{stale,version,updated_at,token,public_url}` | `archive-api.ts:213` | ✅ |
+| POST | `/api/docs/:ref/archive/rotate-token` | ✅ | — | `{token,public_url}`；旧链接立即失效 | `archive-api.ts:205` | ✅ |
+| GET | `/a/:token` | 公开 | — | `text/html` 自包含归档页（当前 active 版本） | `archive-api.ts:144` | ✅ |
+| GET | `/a/:token/md` | 公开 | `?download=1` 加附件头 | `text/markdown` | `archive-api.ts:126` | ✅ |
+| GET | `/a/:token/v/:n` | ✅（历史版本只给登录用户） | — | `text/html` 该版本 | `archive-api.ts:110` | ✅ |
 
+`ArchiveItem` = `{doc_id,doc_key,title,version,created_at,stale,token,history_count,note,space_id,space_name}`。
 `ArchiveEntry` = `{id, doc_key, title, archive_path, share_id, html_url, md_url, created_at, stale, qdrant_sync, qdrant_synced_at}`。
-只有生成过带 `html_url` 的分享才会自动进归档。
+`ArchiveArtifact`（current/history 元素）= `{id,version,status,created_at,note,md_url,html_url,md_size,html_size,source_content_sha256,version_url}`。
 
 ## 4. 分享
 
+源码：`src/server/api.ts`（`/s/:id` 在 `api.ts:98`），删除与 `/a/*` 在 `archive-api.ts`
+
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| POST | `/api/share` | ✅ | `{doc_key?,share_md,images?,md_url?,html_url?}` | `{id}` | `api.ts:167` | ✅ |
-| GET | `/api/share` | ✅ | `?doc_key=` 可选 | `[{id,user_id,doc_key,md_url,html_url,created_at}]` | `api.ts:184` | ✅ |
-| GET | `/api/share/:id` | ✅ | — | `{...share, images:[...]}`；不存在 404 | `api.ts:178` | ✅ |
-| POST | `/api/share/:id/html` | ✅ | `{html_url}` | `{ok:true}` | `api.ts:172` | ✅ |
-| DELETE | `/api/share/:id` | ✅ | — | `{ok:true}`；不影响七牛上已传文件 | `api.ts:188` | ✅ |
-| GET | `/s/:id` | ✅（**要认证**，匿名 401） | — | `text/html` 自包含分享页；不存在 404 | `api.ts:63` | ✅ |
+| POST | `/api/share` | ✅ | `{doc_key?,share_md,images?,md_url?,html_url?}` | `{id}` | `api.ts:353` | ✅ |
+| GET | `/api/share` | ✅ | `?doc_key=` 可选 | `[{id,user_id,doc_key,md_url,html_url,created_at}]` | `api.ts:381` | ✅ |
+| GET | `/api/share/:id` | ✅ | — | `{...share, images:[...]}`；不存在 404 | `api.ts:374` | ✅ |
+| POST | `/api/share/:id/html` | ✅ | `{html_url}` | `{ok:true}` | `api.ts:366` | ✅ |
+| DELETE | `/api/share/:id` | ✅ | `?purge=1` 时同时删七牛对象 | `{ok:true,deleted?}`；不带 purge 不影响七牛文件 | `archive-api.ts:258` | ✅ |
+| GET | `/s/:id` | ✅（**要认证**，匿名 401） | — | `text/html`；文档已有归档 token 时 302 到 `/a/<token>` | `api.ts:98` | ✅ |
 
-`images` 元素 = `{qiniu_key,url,mermaid_hash?}`。
+`images` 元素 = `{qiniu_key,url,mermaid_hash?}`。对外交付请用 `/a/<token>`：`/s/:id` 是旧路由，
+恒需登录，前端已无入口生成它。
 
 ## 5. 媒体与上传
 
@@ -96,7 +125,7 @@
 
 | 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/media` | ✅ | `?q=`（filename/url 模糊）、`?source=direct\|mermaid` | `MediaRow[]`（最多 500，按时间倒序） | `api.ts:195` | ✅ |
+| GET | `/api/media` | ✅ | `?q=`（filename/url 模糊）、`?source=direct\|mermaid\|share` | `MediaRow[]`（最多 500，按时间倒序） | `api.ts:195` | ✅ |
 | DELETE | `/api/media/:id` | ✅ | — | `{ok:true}`；同时删七牛对象 | `api.ts:202` | ⚠️ 未实测（需七牛） |
 | GET | `/api/upload` | ✅ | — | `{configured:boolean}` | `upload-api.ts:24` | ✅ |
 | POST | `/api/upload` | ✅ | 裸二进制 body；头 `x-filename`、可选 `x-key-prefix`、`x-source: mermaid\|share\|direct` | `{key,url}` | `upload-api.ts:28` | ⚠️ 未实测（需七牛密钥；未配置时 400 `请先完成对象存储配置`） |
@@ -122,13 +151,43 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | GET | `/api/storage` | ✅ | — | `{access_key,bucket,domain,zone,private_bucket,url_ttl,secret_configured,verified}`（不回显 SecretKey） | `api.ts:77` | ✅ |
 | POST | `/api/storage/test` | ✅ | 同 PUT 字段 | `{ok:true}`；连通性失败 400 带七牛原文 | `api.ts:80` | ✅（错误分支） |
-| PUT | `/api/storage` | ✅ | `{access_key,secret_key?,bucket,domain,zone,private_bucket?,url_ttl?}` | 保存后的公开配置；`secret_key` 省略则沿用旧值 | `api.ts:86` | ✅（错误分支） |
+| PUT | `/api/storage` | ✅ | `{access_key,secret_key?,bucket,domain,zone,private_bucket?,url_ttl?}` | 保存后的公开配置；`secret_key` 省略则沿用旧值 | `api.ts:136` | ✅（错误分支） |
+| POST | `/api/storage/selfcheck` | ✅ | 同 PUT 字段（未保存也能测） | 私有桶自检：上传探针图 → 重签 → HEAD 的三态结果 | `api.ts:131` | ✅ |
 
 `zone` 必须是合法七牛区域（如 `Zone_z0`）；`url_ttl` 60 秒–30 天，默认 3600。
 SecretKey 用 `PTDOC_DATA_KEY` 做 AES-256-GCM 加密落库。成功分支需真实七牛密钥，
 本机只验证了 `{"error":"七牛连通性校验失败（HTTP 401）：...\"BadToken\"..."}`。
 
-## 8. 智能体与扩展
+## 8. 空间与目录（Space）
+
+源码：`src/server/api.ts` / `db.ts`
+
+| 方法 | 路径 | 认证 | 入参 | 返回 | 源码位置 | 验证 |
+| --- | --- | --- | --- | --- | --- | --- |
+| GET | `/api/spaces` | ✅ | — | `{spaces:[{id,user_id,name,is_default,sort_order,created_at}]}` | `api.ts:167` | ✅ |
+| POST | `/api/spaces` | ✅ | `{name}` | 新空间 | `api.ts:170` | ✅ |
+| POST | `/api/spaces/reorder` | ✅ | `{order:[id...]}` | `{ok:true}` | `api.ts:174` | ✅ |
+| GET | `/api/spaces/:id/tree` | ✅ | — | 该空间的目录树 | `api.ts:178` | ✅ |
+| POST | `/api/spaces/:id/folders` | ✅ | `{name,parent_id?}` | 新目录 | `api.ts:182` | ✅ |
+| PATCH | `/api/spaces/:id` | ✅ | `{name}` 或 `{is_default:true}` | 改名的 `{ok}` / 转移默认标记的 `{ok,space_id}` | `api.ts:187` | ✅ |
+| DELETE | `/api/spaces/:id` | ✅ | `?move_to=`（非空空间必须给） | `{ok:true}`；默认空间不可删 | `api.ts:196` | ✅ |
+| POST | `/api/folders/:id/move` | ✅ | `{space_id?,parent_id?,before_id?/after_id?}` | `{ok:true}` | `api.ts:200` | ✅ |
+| PATCH | `/api/folders/:id` | ✅ | `{name}` | `{ok:true}` | `api.ts:205` | ✅ |
+| DELETE | `/api/folders/:id` | ✅ | — | `{ok:true}` | `api.ts:209` | ✅ |
+
+**空间筛选参数**：`?space=` 三种取值——省略=全部空间（读接口向后兼容）、`all`=显式全部、数字 id 或空间名=该空间。
+`doc_key` 在**每个空间内**唯一；不带 `space` 而跨空间重名 → 409。
+
+## 9. 留存策略（FR-23）
+
+| 方法 | 路径 | 认证 | 入参 | 返回 |
+| --- | --- | --- | --- | --- |
+| GET | `/api/settings/retention` | ✅ | — | `{snapshot_keep_count,snapshot_keep_days,snapshot_keep_min}` |
+| PUT | `/api/settings/retention` | ✅ | 同上字段 | 保存后的策略 |
+
+---
+
+## 10. 智能体与扩展
 
 源码：`src/server/agent-api.ts`
 
@@ -169,10 +228,11 @@ SecretKey 用 `PTDOC_DATA_KEY` 做 AES-256-GCM 加密落库。成功分支需真
 
 以下在源码里没有，脚本里别写：
 
-- 文档历史版本列表之外的「按 doc_key 直接取文档」——只有 `GET /api/docs/:id`（数字 id）。
+- 「按 doc_key 直接取文档」只存在于 `versions`/`archive` 这类子路由上（它们接受转义 doc_key）；
+  单纯读一篇仍只有 `GET /api/docs/:id`（数字 id），先 `GET /api/docs` 拿 id。
 - 分享页的公开访问控制开关；`/s/:id` 恒需要认证。
 - 删除用户的接口（只有改角色、停用、重置密码）。
-- 任何 `/api/docs/:id/export`、`/api/search`（搜索就是 `GET /api/docs?q=`）。
+- 任何 `/api/docs/:id/export`（导出全站用 `GET /api/docs/export.zip`）、`/api/search`（搜索就是 `GET /api/docs?q=`）。
 - 分页参数：列表接口都不支持 `limit`/`offset`（`/api/media` 硬上限 500，搜索上限 50）。
 
 ## 验证方法（可复现）

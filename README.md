@@ -238,11 +238,23 @@ ptdocctl --url ... --token ... get <doc_id|doc_key>            # 打印文档全
 ptdocctl --url ... --token ... pull [dir]                      # 全量拉取工作区 md 到本地目录
 ptdocctl --url ... --token ... push a.md b.md                  # 上传 md（doc_key=文件名）
 ptdocctl --url ... --token ... pushr ./docs                    # 递归上传目录，doc_key 含子目录路径
-ptdocctl --url ... --token ... delete <doc_id>
-ptdocctl --url ... --token ... search <keyword>
+ptdocctl --url ... --token ... delete <doc_id|doc_key>         # 删除
+ptdocctl --url ... --token ... search <keyword>                # 搜索
+ptdocctl --url ... --token ... rename <doc> <new_key>          # 改 doc_key
+ptdocctl --url ... --token ... title <doc> <标题>              # 改标题（正文不动）
+ptdocctl --url ... --token ... versions <doc>                  # 版本列表
+ptdocctl --url ... --token ... version <doc> <vid>             # 打印某个版本
+ptdocctl --url ... --token ... snapshot <doc> [label]          # 手动存版本
+ptdocctl --url ... --token ... restore <doc> <vid>             # 回滚到某个版本
+ptdocctl --url ... --token ... export [file]                   # 导出全站 md 为 zip
 ```
 
-`--url/--token/--user/--pass` 是全局参数，子命令前后均可，也支持 `--token=xxx` 连写。
+`--url/--token/--user/--pass/--space/--force` 是全局参数，子命令前后均可，也支持 `--token=xxx` 连写。
+
+- `--space <name|id>`：读命令只列/只拉该空间，写命令落该空间；不传时读=全部、写=默认空间。
+- `--force`：`push`/`pull` 默认先比 sha256，内容冲突时停下并列清单（退出码 1）；
+  `--force` 才覆盖，`push --force` 先打快照、`pull --force` 先把本地另存 `.bak-<ts>`。
+- 要结构化数据（JSON）或分享/媒体/归档/空间管理，走 REST 接口（见 `skills/ptdoc/references/api.md`）。
 
 安装：
 
